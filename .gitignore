@@ -1,0 +1,42 @@
+# Local Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Frontend dependencies/build output
+node_modules/
+dist/
+coverage/
+htmlcov/
+
+# Local configuration and secrets
+.env
+# Ignore all environment overrides, but keep the documented template.
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+
+# Local runtime data: uploaded documents, extracted text, and generated indexes
+data/
+*.sqlite3
+*.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+
+# Editors and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
