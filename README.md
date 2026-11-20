@@ -13,22 +13,27 @@ A local-first project intelligence workspace that turns project documents into s
 - [5. Milestone 2: project intelligence agents](#5-milestone-2-project-intelligence-agents)
 - [6. Milestone 3: advanced project intelligence](#6-milestone-3-advanced-project-intelligence)
 - [7. Milestone 4: project insights and incremental uploads](#7-milestone-4-project-insights-and-incremental-uploads)
-- [8. Application workflow](#8-application-workflow)
-- [9. User interface](#9-user-interface)
-- [10. Screenshots](#10-screenshots)
-- [11. Repository structure](#11-repository-structure)
-- [12. Installation and setup](#12-installation-and-setup)
-- [13. API reference](#13-api-reference)
-- [14. Testing and validation](#14-testing-and-validation)
-- [15. Security and error handling](#15-security-and-error-handling)
-- [16. Limitations and future enhancements](#16-limitations-and-future-enhancements)
-- [17. Conclusion](#17-conclusion)
+- [8. AI agents: inputs, processing, and outputs](#8-ai-agents-inputs-processing-and-outputs)
+- [9. Application workflow](#9-application-workflow)
+- [10. User interface](#10-user-interface)
+- [11. Screenshots](#11-screenshots)
+- [12. Repository structure](#12-repository-structure)
+- [13. Installation and setup](#13-installation-and-setup)
+- [14. API reference](#14-api-reference)
+- [15. Testing and validation](#15-testing-and-validation)
+- [16. Security and error handling](#16-security-and-error-handling)
+- [17. Limitations and future enhancements](#17-limitations-and-future-enhancements)
+- [18. Conclusion](#18-conclusion)
 
 ## 1. Project overview
 
 ### Problem statement
 
 Enterprise project facts are commonly spread across meeting notes, project plans, spreadsheets, presentations, and status reports. Manually searching these files makes it difficult to establish what is current, locate the evidence behind a decision, and consistently identify delivery risks, dependencies, blockers, and responsibilities.
+
+### Existing system
+
+Traditional project tracking relies on separate files, status meetings, spreadsheets, and manually prepared reports. This can leave information fragmented, make document review slow, delay risk and blocker discovery, and make it difficult to trace a summary back to the source evidence. This application complements those workflows with a searchable local project record; it does not replace an organization's project-management system.
 
 ### Proposed solution
 
@@ -91,7 +96,7 @@ Versions below are those declared in the repository manifests unless marked as t
 | Testing | pytest, HTTPX, FastAPI TestClient | pytest `>=8.3`; HTTPX `>=0.28` | Backend unit and API integration tests |
 | Build validation | TypeScript compiler and Vite | Frontend manifest | Type-check and production frontend build |
 
-The Python dependency declarations are in [`backend/requirements.txt`](backend/requirements.txt) and [`backend/pyproject.toml`](backend/pyproject.toml); frontend versions are in [`frontend/package.json`](frontend/package.json) and the lockfile. Validation tool versions and results are recorded in [Testing and validation](#14-testing-and-validation).
+The Python dependency declarations are in [`backend/requirements.txt`](backend/requirements.txt) and [`backend/pyproject.toml`](backend/pyproject.toml); frontend versions are in [`frontend/package.json`](frontend/package.json) and the lockfile. Validation tool versions and results are recorded in [Testing and validation](#15-testing-and-validation).
 
 ## 3. System architecture
 
@@ -295,7 +300,20 @@ Risk probability and impact are currently `null` in the Project Insights respons
 
 Uploads are processed synchronously in the upload request. The application processes a changed file as a new document; it does not compute a byte-level or paragraph-level diff against the previous version.
 
-## 8. Application workflow
+## 8. AI agents: inputs, processing, and outputs
+
+| Agent/service | Inputs | Processing | Outputs |
+|---|---|---|---|
+| Scope & Deliverables Agent | Current indexed project documents and their extracted text/chunks | Rule-based matching for goals, objectives, requirements, deliverables, milestones, owners, dependencies, progress, and workbook rows; links findings to source chunks where possible | Scope summary, deliverables, milestones, responsibilities, dependencies, progress, missing-information notes, and evidence references |
+| Risk Intelligence Agent | Current indexed project documents and extracted project statements | Rule-based risk phrase detection and deterministic severity/category/recommendation rules; no probabilistic forecasting | Risk findings with severity, recommendations, relevant dates/milestones where found, and source evidence |
+| Blockers & Action Items Agent | Current indexed project documents and extracted project statements | Classifies explicit blockers, pending decisions, and action items; extracts owners, dates, priority, or related work only when stated | Blockers, pending decisions, action items, and evidence references |
+| Documentation Generation | Selected indexed document IDs; reuses scope, risk, and blocker/action outputs with source text | Creates a saved, source-grounded generation for the selected document set; unsupported output categories remain empty | User stories, risk-register entries, structured actions, pending decisions, and CSV/JSON export |
+| Project Health Scoring | Current indexed documents, extracted text, and outputs from the three Milestone 2 agents | Calculates scope clarity, timeline health, and blocker health using the documented weighted formula and evidence-based factors | Dimension scores, overall score/classification when sufficient evidence exists, findings, and recommended actions |
+| Conversational Project Intelligence Assistant | A question, session UUID, optional document filter, and retrieval limit | Combines ChromaDB semantic candidates with SQLite lexical candidates, reranks and verifies source chunks, then routes health and supported register questions or calls the configured LLM for open-ended answers | Answer mode, answer, source references, and persisted conversation history; insufficient evidence or provider errors are reported explicitly |
+
+The Scope, Risk, and Blockers/Actions agents are deterministic extraction services rather than autonomous LLM agents. Documentation Generation and Project Health orchestrate these outputs with indexed evidence. The assistant uses an LLM only for open-ended synthesis when a provider is explicitly configured.
+
+## 9. Application workflow
 
 ```mermaid
 flowchart TD
@@ -330,7 +348,7 @@ flowchart TD
     D -. no duplicate indexing .-> K
 ```
 
-## 9. User interface
+## 10. User interface
 
 The interface uses a responsive enterprise workspace layout with grouped sidebar navigation, a sticky top bar, API/AI status indicators, cards and tables, loading/empty/error states, and evidence panels. Styling uses a light gray workspace, white surfaces, a dark navy sidebar, and indigo/cyan accents. The theme is implemented in CSS; it is not a user-selectable dark/light theme.
 
@@ -354,7 +372,7 @@ The interface uses a responsive enterprise workspace layout with grouped sidebar
 
 The frontend uses a keyboard shortcut (`Ctrl+K` or `Cmd+K`) to open Semantic Search. The interface polls backend health every 30 seconds. Project Assistant conversation history is keyed by a session UUID stored in browser session storage and persisted by the backend.
 
-## 10. Screenshots
+## 11. Screenshots
 
 No screenshot files are currently committed. The entries below are **placeholders only**; capture real screenshots and add the files before replacing them with active image links. No screenshots are fabricated by this README.
 
@@ -372,7 +390,7 @@ No screenshot files are currently committed. The entries below are **placeholder
 | Incremental Document Upload | `docs/screenshots/incremental-document-upload.png` | Not captured |
 | Project Insights | `docs/screenshots/project-insights.png` | Not captured |
 
-## 11. Repository structure
+## 12. Repository structure
 
 ```text
 .
@@ -476,14 +494,14 @@ No screenshot files are currently committed. The entries below are **placeholder
 | `backend/app/schemas/` | Pydantic request/response and analysis schemas |
 | `backend/app/services/` | Parsing, cleaning, chunking, embeddings, vector storage, pipeline, agents, documentation, health, and assistant logic |
 | `backend/tests/` | Processing, API, agent, assistant, documentation, health, provider-configuration, and versioning tests |
-| `frontend/src/pages/` | Application pages listed in the [user-interface section](#9-user-interface) |
+| `frontend/src/pages/` | Application pages listed in the [user-interface section](#10-user-interface) |
 | `frontend/src/components/` | Shared interface and evidence components |
 | `frontend/src/services/api.ts` | Typed frontend API calls and user-facing API error formatting |
 | `data/` | Local uploads, a startup-created extracted-text directory, SQLite database, and persistent ChromaDB files; extracted text is persisted in SQLite |
 
 The `backend/app/models/` package currently contains no database ORM models; persistence is implemented with SQLite queries in the database and service modules.
 
-## 12. Installation and setup
+## 13. Installation and setup
 
 ### Prerequisites
 
@@ -493,6 +511,15 @@ The `backend/app/models/` package currently contains no database ORM models; per
 - Network access may be required for dependency installation and the first uncached sentence-transformers model load.
 - Optional: LibreOffice on `PATH` for legacy `.doc` and `.ppt` files.
 - Optional: OpenAI, Azure OpenAI, or Ollama configuration for open-ended assistant responses.
+
+### Clone the repository
+
+Run these commands in PowerShell from the parent folder where you want the project directory created:
+
+```powershell
+git clone https://github.com/mudireddycharitha/Development-of-AI-Driven-Enterprise-Project-Intelligence-Risk-Management-Platform.git
+Set-Location Development-of-AI-Driven-Enterprise-Project-Intelligence-Risk-Management-Platform
+```
 
 ### Create the Python environment and install backend dependencies
 
@@ -573,7 +600,7 @@ Open the frontend at [http://127.0.0.1:5173](http://127.0.0.1:5173). The API hea
 
 Local data defaults to `data\uploads`, `data\extracted_text`, `data\metadata\platform.sqlite3`, and `data\chroma_db`. Set `APP_DATA_DIR` to use another writable directory.
 
-## 13. API reference
+## 14. API reference
 
 All endpoints are served by the FastAPI application on the configured backend origin. JSON response shapes are described at a high level below; `/docs` exposes the generated OpenAPI request and response schemas.
 
@@ -632,7 +659,7 @@ All endpoints are served by the FastAPI application on the configured backend or
 
 Common error responses include validation errors (4xx), missing resources (404), unprocessable document/request errors (422), provider configuration or generation failures (503), and LLM timeouts (504). Error details are returned through FastAPI's `detail` field; exact schemas are available in `/docs`.
 
-## 14. Testing and validation
+## 15. Testing and validation
 
 The following checks were executed while preparing this report:
 
@@ -667,7 +694,7 @@ python -m pytest tests\test_processing.py -k real_embedding
 Remove-Item Env:\RUN_MODEL_INTEGRATION
 ```
 
-## 15. Security and error handling
+## 16. Security and error handling
 
 - Uploads are restricted to registered extensions, checked for empty content, and limited by file, batch, extracted-character, and chunk-count settings. Stored names are generated from UUIDs; original names are reduced to a basename and sanitized for storage.
 - `.env` is ignored by Git; `.env.example` contains configuration names and placeholders, not real credentials. Provider secrets are read only by the backend and are not returned in health/status responses.
@@ -677,7 +704,7 @@ Remove-Item Env:\RUN_MODEL_INTEGRATION
 - SQLite operations use parameterized values for records; database connections enable foreign-key enforcement. Startup initializes the local schema and adds document-version columns for existing databases without discarding existing records.
 - CORS origins are configurable. The application does **not** implement authentication, authorization, tenant isolation, or a shared-user access-control layer. Do not expose this local development service to an untrusted network without adding suitable controls.
 
-## 16. Limitations and future enhancements
+## 17. Limitations and future enhancements
 
 ### Current limitations
 
@@ -698,6 +725,6 @@ Remove-Item Env:\RUN_MODEL_INTEGRATION
 - Add automated browser-based end-to-end tests and capture real product screenshots.
 - Improve date and entity extraction, and evaluate agent findings against a labeled project-document dataset.
 
-## 17. Conclusion
+## 18. Conclusion
 
 The platform addresses the fragmentation of project information by turning local project documents into a searchable, source-linked knowledge base. It connects document extraction and semantic retrieval with transparent rule-based scope, risk, blocker, and health analysis; saved structured documentation; and a conversational assistant that cites retrieved evidence. Its incremental version handling preserves earlier indexed records while keeping current analysis focused on the latest successfully indexed same-name version. The result is a practical local foundation for evidence-grounded project review, with clear boundaries around heuristic findings, model use, and current operational limitations.
