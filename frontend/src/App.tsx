@@ -9,6 +9,10 @@ import { EmbeddingsExplorer } from './pages/EmbeddingsExplorer'
 import { SemanticSearch } from './pages/SemanticSearch'
 import { SettingsPage } from './pages/Settings'
 import { ProjectIntelligence } from './pages/ProjectIntelligence'
+import { DocumentationGeneration } from './pages/DocumentationGeneration'
+import { ProjectHealth } from './pages/ProjectHealth'
+import { ProjectAssistant } from './pages/ProjectAssistant'
+import { ProjectInsights } from './pages/ProjectInsights'
 
 export default function App() {
   return <BrowserRouter><Routes><Route element={<AppLayout />}>
@@ -20,6 +24,10 @@ export default function App() {
     <Route path="embeddings" element={<EmbeddingsExplorer />} />
     <Route path="search" element={<SemanticSearch />} />
     <Route path="project-intelligence" element={<ProjectIntelligence />} />
+    <Route path="documentation" element={<DocumentationGeneration />} />
+    <Route path="project-health" element={<ProjectHealth />} />
+    <Route path="project-insights" element={<ProjectInsights />} />
+    <Route path="assistant" element={<ProjectAssistant />} />
     <Route path="settings" element={<SettingsPage />} />
   </Route></Routes></BrowserRouter>
 }

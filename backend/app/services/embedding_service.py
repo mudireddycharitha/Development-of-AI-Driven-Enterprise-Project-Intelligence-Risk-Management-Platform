@@ -1,10 +1,13 @@
+import logging
 import threading
+from time import perf_counter
 from typing import Any, Sequence
 
 import numpy as np
 
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
 _model: Any = None
 _model_name: str | None = None
 _lock = threading.Lock()
@@ -15,15 +18,22 @@ def get_model() -> Any:
     if _model is None or _model_name != settings.embedding_model:
         with _lock:
             if _model is None or _model_name != settings.embedding_model:
+                started = perf_counter()
                 from sentence_transformers import SentenceTransformer
                 _model = SentenceTransformer(settings.embedding_model)
                 _model_name = settings.embedding_model
+                logger.info(
+                    "Embedding model loaded model=%s duration_ms=%.1f",
+                    _model_name,
+                    (perf_counter() - started) * 1000,
+                )
     return _model
 
 
 def embed_texts(texts: Sequence[str]) -> list[list[float]]:
     if not texts or any(not text.strip() for text in texts):
         raise ValueError("Embedding input must contain nonempty text.")
+    started = perf_counter()
     vectors = get_model().encode(
         list(texts), convert_to_numpy=True, normalize_embeddings=True,
         show_progress_bar=False,
@@ -33,6 +43,13 @@ def embed_texts(texts: Sequence[str]) -> list[list[float]]:
         raise RuntimeError("The embedding model returned an invalid vector shape.")
     if not np.isfinite(result).all():
         raise RuntimeError("The embedding model returned non-finite values.")
+    logger.info(
+        "Embedding batch completed model=%s inputs=%d dimensions=%d duration_ms=%.1f",
+        settings.embedding_model,
+        len(texts),
+        result.shape[1],
+        (perf_counter() - started) * 1000,
+    )
     return result.tolist()
 
 

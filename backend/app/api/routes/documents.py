@@ -71,7 +71,8 @@ async def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, Any
             file_digest = digest.hexdigest()
             with connect() as connection:
                 existing = row_dict(connection.execute(
-                    """SELECT id, processing_status, chunk_count, indexed_chunk_count
+                    """SELECT id, processing_status, chunk_count, indexed_chunk_count,
+                              document_version, is_current_version
                        FROM documents WHERE sha256 = ?""",
                     (file_digest,),
                 ).fetchone())
@@ -83,9 +84,19 @@ async def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, Any
                     "status": existing["processing_status"],
                     "chunk_count": existing["chunk_count"],
                     "indexed_chunk_count": existing["indexed_chunk_count"],
+                    "document_version": existing.get("document_version", 1),
                     "duplicate": True,
                 })
                 continue
+            with connect() as connection:
+                previous_version = row_dict(connection.execute(
+                    """SELECT id, document_version, version_of_document_id
+                       FROM documents WHERE lower(filename) = lower(?)
+                         AND is_current_version = 1
+                       ORDER BY document_version DESC LIMIT 1""",
+                    (original_name,),
+                ).fetchone())
+            version = (previous_version["document_version"] + 1) if previous_version else 1
             name = SAFE_FILENAME.sub("_", original_name).strip("._") or f"document{extension}"
             stored_name = f"{document_id}_{name}"
             renamed = settings.uploads_dir / stored_name
@@ -97,15 +108,18 @@ async def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, Any
                     connection.execute(
                         """INSERT INTO documents
                            (id, filename, stored_filename, file_type, file_size, sha256,
-                            uploaded_at, created_at, updated_at, processing_status)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded')""",
+                           uploaded_at, created_at, updated_at, processing_status,
+                           version_of_document_id, document_version, is_current_version)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?, 0)""",
                         (document_id, original_name, stored_name, _file_type(original_name),
-                         file_size, file_digest, now, now, now),
+                         file_size, file_digest, now, now, now,
+                         previous_version["id"] if previous_version else None, version),
                     )
             except sqlite3.IntegrityError:
                 with connect() as connection:
                     existing = row_dict(connection.execute(
-                        """SELECT id, processing_status, chunk_count, indexed_chunk_count
+                        """SELECT id, processing_status, chunk_count, indexed_chunk_count,
+                                  document_version, is_current_version
                            FROM documents WHERE sha256 = ?""",
                         (file_digest,),
                     ).fetchone())
@@ -115,7 +129,8 @@ async def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, Any
                 results.append({
                     "document_id": existing["id"], "filename": original_name,
                     "status": existing["processing_status"], "chunk_count": existing["chunk_count"],
-                    "indexed_chunk_count": existing["indexed_chunk_count"], "duplicate": True,
+                    "indexed_chunk_count": existing["indexed_chunk_count"],
+                    "document_version": existing.get("document_version", 1), "duplicate": True,
                 })
                 continue
             try:
@@ -123,9 +138,11 @@ async def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, Any
                 results.append({
                     "document_id": document_id,
                     "filename": original_name,
-                    "status": document["processing_status"],
+                    "status": "updated" if previous_version and document["processing_status"] == "indexed" else document["processing_status"],
                     "chunk_count": document["chunk_count"],
                     "indexed_chunk_count": document["indexed_chunk_count"],
+                    "document_version": version,
+                    "previous_document_id": previous_version["id"] if previous_version else None,
                 })
             except Exception as error:
                 logger.exception("Upload processing failed for %s", original_name)
@@ -151,10 +168,21 @@ async def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, Any
             })
         finally:
             await upload.close()
+    insights_refresh_error = None
+    if any(item.get("status") in {"indexed", "updated"} and not item.get("duplicate") for item in results):
+        try:
+            from app.services.project_health import calculate_project_health
+
+            await run_in_threadpool(calculate_project_health)
+        except Exception as error:
+            logger.exception("Project insights refresh failed after document upload")
+            insights_refresh_error = safe_error_message(error)
     return {
         "results": results,
-        "successful": sum(result["status"] == "indexed" for result in results),
+        "successful": sum(result["status"] in {"indexed", "updated"} for result in results),
         "failed": sum(result["status"] == "failed" for result in results),
+        "updated": sum(result["status"] == "updated" for result in results),
+        "insights_refresh_error": insights_refresh_error,
     }
 
 
@@ -186,7 +214,8 @@ def list_documents(
         total = connection.execute(f"SELECT COUNT(*) FROM documents {where}", values).fetchone()[0]
         rows = connection.execute(
             f"""SELECT id, filename, file_type, file_size, uploaded_at, created_at, updated_at,
-                       processing_status, extraction_error, failed_stage,
+                       processing_status, extraction_error, failed_stage, version_of_document_id,
+                       document_version, is_current_version,
                        (SELECT COUNT(*) FROM chunks c WHERE c.document_id = documents.id) AS chunk_count
                 FROM documents {where} ORDER BY uploaded_at DESC LIMIT ? OFFSET ?""",
             [*values, page_size, (page - 1) * page_size],
@@ -298,7 +327,9 @@ def reprocess_document(document_id: str) -> dict[str, Any]:
 def delete_document_endpoint(document_id: str) -> dict[str, str]:
     with connect() as connection:
         document = row_dict(connection.execute(
-            "SELECT stored_filename FROM documents WHERE id = ?", (document_id,)
+            """SELECT stored_filename, filename, is_current_version
+               FROM documents WHERE id = ?""",
+            (document_id,),
         ).fetchone())
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found.")
@@ -309,5 +340,17 @@ def delete_document_endpoint(document_id: str) -> dict[str, str]:
         raise HTTPException(status_code=503, detail="Could not clean up the document index.") from error
     with connect() as connection:
         connection.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+        if document["is_current_version"]:
+            previous = connection.execute(
+                """SELECT id FROM documents WHERE lower(filename) = lower(?)
+                   AND processing_status = 'indexed'
+                   ORDER BY document_version DESC LIMIT 1""",
+                (document["filename"],),
+            ).fetchone()
+            if previous:
+                connection.execute(
+                    "UPDATE documents SET is_current_version = 1 WHERE id = ?",
+                    (previous["id"],),
+                )
     (settings.uploads_dir / document["stored_filename"]).unlink(missing_ok=True)
     return {"document_id": document_id, "status": "deleted"}

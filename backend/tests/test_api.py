@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.api.routes import search
 from app.database.db import connect
-from app.services import pipeline, vector_store
+from app.services import assistant, pipeline, vector_store
 
 
 def test_mixed_upload_search_persistence_retry_and_delete(tmp_path, monkeypatch) -> None:
@@ -161,3 +161,173 @@ def test_search_reports_vector_store_failure(monkeypatch) -> None:
     assert response.status_code == 503
     assert "ChromaDB" in response.json()["detail"]
     assert "vector-store health" in response.json()["detail"]
+
+
+def test_updated_document_versions_replace_current_retrieval_without_losing_history(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("APP_DATA_DIR", str(tmp_path / "platform-data"))
+    embedding_batches = []
+
+    def fake_embed(texts):
+        embedding_batches.append(list(texts))
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(pipeline, "embed_texts", fake_embed)
+    monkeypatch.setattr(search, "embed_texts", lambda texts: [[1.0, 0.0, 0.0] for _ in texts])
+    monkeypatch.setattr(assistant, "embed_texts", lambda texts: [[1.0, 0.0, 0.0] for _ in texts])
+    monkeypatch.setattr(assistant, "maybe_call_llm", lambda prompt, context: "The updated report identifies a critical schedule risk. [S1]")
+    vector_store.reset_client()
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/documents/upload",
+            files=[("files", ("weekly-status.txt", b"Project Alpha baseline report.", "text/plain"))],
+        ).json()["results"][0]
+        second = client.post(
+            "/documents/upload",
+            files=[("files", ("weekly-status.txt", b"Project Alpha has a critical schedule risk; action item: resolve the dependency.", "text/plain"))],
+        ).json()["results"][0]
+
+        assert first["status"] == "indexed"
+        assert second["status"] == "updated"
+        assert second["document_version"] == 2
+        assert second["previous_document_id"] == first["document_id"]
+        assert len(embedding_batches) == 2
+        assert all("baseline report" not in text for text in embedding_batches[1])
+
+        first_record = client.get(f"/documents/{first['document_id']}").json()
+        second_record = client.get(f"/documents/{second['document_id']}").json()
+        assert first_record["is_current_version"] == 0
+        assert first_record["document_version"] == 1
+        assert second_record["is_current_version"] == 1
+        assert second_record["version_of_document_id"] == first["document_id"]
+
+        results = client.post("/search", json={"query": "What is the current schedule risk?", "top_k": 5}).json()["results"]
+        assert results
+        assert {item["document_id"] for item in results} == {second["document_id"]}
+        assert "critical schedule risk" in results[0]["text"]
+        assistant_response = client.post("/assistant/chat", json={
+            "session_id": "bd2ad170-e6a8-4bdb-b7a1-2db363e55c3b",
+            "question": "What schedule risk was identified?",
+            "top_k": 3,
+        })
+        assert assistant_response.status_code == 200
+        assert {item["document_id"] for item in assistant_response.json()["sources"]} == {second["document_id"]}
+
+        insights = client.get("/project-insights")
+        assert insights.status_code == 200
+        assert insights.json()["health"]["document_count"] == 1
+        assert insights.json()["risks"]
+        assert insights.json()["actions"]
+
+        assert client.get(f"/documents/{first['document_id']}/text").status_code == 200
+        assert client.delete(f"/documents/{second['document_id']}").status_code == 200
+        restored = client.get(f"/documents/{first['document_id']}").json()
+        assert restored["is_current_version"] == 1
+    vector_store.reset_client()
+
+
+def test_incremental_upload_reuses_hash_and_retrieves_existing_and_new_documents(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("APP_DATA_DIR", str(tmp_path / "platform-data"))
+    embedding_batches = []
+
+    def fake_embed(texts):
+        embedding_batches.append(list(texts))
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(pipeline, "embed_texts", fake_embed)
+    monkeypatch.setattr(search, "embed_texts", lambda texts: [[1.0, 0.0, 0.0] for _ in texts])
+    monkeypatch.setattr(assistant, "embed_texts", lambda texts: [[1.0, 0.0, 0.0] for _ in texts])
+    monkeypatch.setattr(assistant, "maybe_call_llm", lambda prompt, context: "The evidence is available. [S1]")
+    vector_store.reset_client()
+
+    with TestClient(app) as client:
+        first = client.post("/documents/upload", files=[
+            ("files", ("portfolio.txt", b"Project Atlas goal: deliver a baseline portfolio.", "text/plain")),
+        ]).json()["results"][0]
+        first_vector_ids = set(vector_store.get_collection().get(
+            where={"document_id": first["document_id"]},
+        )["ids"])
+        second = client.post("/documents/upload", files=[
+            ("files", ("integration.md", b"Kestrel integration requires a secure launch checklist.", "text/markdown")),
+        ]).json()["results"][0]
+        all_vector_ids = set(vector_store.get_collection().get()["ids"])
+
+        assert first["status"] == second["status"] == "indexed"
+        assert first_vector_ids and first_vector_ids.issubset(all_vector_ids)
+        assert len(embedding_batches) == 2
+        assert client.get("/documents").json()["total"] == 2
+
+        duplicate = client.post("/documents/upload", files=[
+            ("files", ("renamed-copy.md", b"Kestrel integration requires a secure launch checklist.", "text/markdown")),
+        ]).json()["results"][0]
+        assert duplicate["duplicate"] is True
+        assert duplicate["document_id"] == second["document_id"]
+        assert len(embedding_batches) == 2
+        assert set(vector_store.get_collection().get()["ids"]) == all_vector_ids
+        assert client.get("/documents").json()["total"] == 2
+
+        search_results = client.post("/search", json={
+            "query": "Project Atlas and Kestrel integration",
+            "top_k": 50,
+        }).json()["results"]
+        assert {item["document_id"] for item in search_results} == {
+            first["document_id"], second["document_id"],
+        }
+
+        assistant_result = client.post("/assistant/chat", json={
+            "session_id": "bcab8c0b-fd67-4c97-9752-e8cf6455e95e",
+            "question": "What does the Kestrel integration require?",
+        }).json()
+        assert assistant_result["answer_mode"] == "llm"
+        assert assistant_result["sources"]
+        assert {source["document_id"] for source in assistant_result["sources"]} == {second["document_id"]}
+
+        assert client.delete(f"/documents/{second['document_id']}").status_code == 200
+        after_delete = client.post("/search", json={
+            "query": "Kestrel integration launch checklist",
+            "top_k": 50,
+        }).json()["results"]
+        assert all(item["document_id"] != second["document_id"] for item in after_delete)
+        assert set(vector_store.get_collection().get()["ids"]) == first_vector_ids
+
+    vector_store.reset_client()
+
+
+def test_failed_new_document_version_preserves_current_index_and_retrieval(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("APP_DATA_DIR", str(tmp_path / "platform-data"))
+
+    def fail_new_version(texts):
+        if any("FAIL NEW VERSION" in text for text in texts):
+            raise RuntimeError("deliberate test embedding failure")
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(pipeline, "embed_texts", fail_new_version)
+    monkeypatch.setattr(search, "embed_texts", lambda texts: [[1.0, 0.0, 0.0] for _ in texts])
+    vector_store.reset_client()
+
+    with TestClient(app) as client:
+        original = client.post("/documents/upload", files=[
+            ("files", ("release-plan.txt", b"Project Atlas release plan is current.", "text/plain")),
+        ]).json()["results"][0]
+        original_vector_ids = set(vector_store.get_collection().get(
+            where={"document_id": original["document_id"]},
+        )["ids"])
+        failed = client.post("/documents/upload", files=[
+            ("files", ("release-plan.txt", b"FAIL NEW VERSION: replacement release plan.", "text/plain")),
+        ]).json()["results"][0]
+
+        assert failed["status"] == "failed"
+        assert client.get(f"/documents/{original['document_id']}").json()["is_current_version"] == 1
+        failed_document = client.get(f"/documents/{failed['document_id']}").json()
+        assert failed_document["processing_status"] == "failed"
+        assert failed_document["is_current_version"] == 0
+        assert set(vector_store.get_collection().get()["ids"]) == original_vector_ids
+
+        results = client.post("/search", json={
+            "query": "current release plan",
+            "top_k": 10,
+        }).json()["results"]
+        assert results
+        assert {item["document_id"] for item in results} == {original["document_id"]}
+
+    vector_store.reset_client()

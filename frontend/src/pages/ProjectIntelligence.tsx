@@ -32,6 +32,9 @@ export function ProjectIntelligence() {
   const [searchParams, setSearchParams] = useSearchParams()
   const requestedView = searchParams.get('view')
   const activeView = requestedView === 'scope' || requestedView === 'risks' || requestedView === 'blockers' ? requestedView : 'all'
+  const pageTitle = activeView === 'scope' ? 'Scope & Deliverables'
+    : activeView === 'risks' ? 'Risk Intelligence'
+      : activeView === 'blockers' ? 'Blockers & Actions' : 'Project Intelligence'
   const [documents, setDocuments] = useState<DocumentRecord[]>([])
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [scope, setScope] = useState<ScopeAnalysis>(emptyScope)
@@ -175,8 +178,8 @@ export function ProjectIntelligence() {
   return <div className="project-intelligence-page">
     <div className="page-heading">
       <div>
-        <div className="eyebrow">MILESTONE 2</div>
-        <h1>Project intelligence agents</h1>
+        <div className="eyebrow">PROJECT INTELLIGENCE</div>
+        <h1>{pageTitle}</h1>
         <p>Extract scope, identify delivery risks, and surface blockers using the indexed project documents and supporting evidence.</p>
       </div>
       <div className="heading-action">

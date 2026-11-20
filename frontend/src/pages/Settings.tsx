@@ -1,31 +1,34 @@
 import { useEffect, useState } from 'react'
-import { Activity, Database, ExternalLink, HardDrive, RefreshCw, Server } from 'lucide-react'
+import { Activity, Database, ExternalLink, HardDrive, RefreshCw, Server, Sparkles } from 'lucide-react'
 import { apiService, errorMessage } from '../services/api'
 import { ErrorState, Loading, PageHeading, StatusBadge } from '../components/Shared'
-
-type Health = { status?: string; database?: string; vector_store?: string; indexed_vectors?: number | null; embedding_model?: string }
+import type { SystemHealth } from '../types'
 
 export function SettingsPage() {
-  const [health, setHealth] = useState<Health | null>(null)
+  const [health, setHealth] = useState<SystemHealth | null>(null)
   const [formats, setFormats] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const load = () => {
     setLoading(true); setError('')
     Promise.all([apiService.health(), apiService.formats()])
-      .then(([status, supported]) => { setHealth(status as Health); setFormats(supported) })
+      .then(([status, supported]) => { setHealth(status); setFormats(supported) })
       .catch(e => setError(errorMessage(e))).finally(() => setLoading(false))
   }
   useEffect(load, [])
   return <>
     <PageHeading eyebrow="CONFIGURATION" title="System status" description="Inspect local service health, model configuration, and available file parsers."
       action={<button className="button button-quiet" onClick={load}><RefreshCw size={15} /> Refresh status</button>} />
-    {loading && <Loading label="Checking backend and vector store…" />}{error && <ErrorState message={error} />}
+    {loading && <Loading label="Checking backend, database, vector store, and AI configuration…" />}{error && <ErrorState message={error} />}
     {health && <>
       <div className="status-grid">
         <section className="panel status-card"><span className="status-icon"><Server size={20} /></span><div><span>API service</span><StatusBadge status={health.status} /></div><p>FastAPI running at <code>http://127.0.0.1:8000</code></p><a href="http://127.0.0.1:8000/docs" target="_blank" rel="noreferrer">Open Swagger UI <ExternalLink size={13} /></a></section>
         <section className="panel status-card"><span className="status-icon"><Database size={20} /></span><div><span>Metadata database</span><StatusBadge status={health.database} /></div><p>SQLite stores document, chunk, and processing metadata.</p></section>
         <section className="panel status-card"><span className="status-icon"><HardDrive size={20} /></span><div><span>Vector store</span><StatusBadge status={health.vector_store} /></div><p>{health.indexed_vectors ?? 'Unavailable'} persisted vectors in the local Chroma collection.</p></section>
+        <section className="panel status-card"><span className="status-icon"><Sparkles size={20} /></span><div><span>AI provider</span><StatusBadge status={health.ai_provider.status} /></div>
+          <p>{health.ai_provider.provider} · {health.ai_provider.model}. {health.ai_provider.message}</p>
+          <small>Provider network connectivity is checked when an assistant request is made.</small>
+        </section>
       </div>
       <section className="panel model-panel"><div className="panel-heading"><div><h2><Activity size={17} /> Embedding model</h2><p>The model loads on first indexing or search request and may need an initial download.</p></div></div>
         <div className="model-name">{health.embedding_model ?? 'Not reported'}</div>

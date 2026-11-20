@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { BlockerAnalysis, ChunkPageResult, ChunkRecord, DocumentPageResult, DocumentRecord, PageResult, PlatformStats, RiskAnalysis, ScopeAnalysis, SearchResult } from '../types'
+import type { AssistantMessage, AssistantResponse, BlockerAnalysis, ChunkPageResult, ChunkRecord, DocumentationResult, DocumentPageResult, DocumentRecord, PageResult, PlatformStats, ProjectHealthResult, ProjectInsightsResult, RiskAnalysis, ScopeAnalysis, SearchResult, SystemHealth } from '../types'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000',
@@ -8,6 +8,18 @@ const api = axios.create({
 
 export function errorMessage(error: unknown): string {
   if (axios.isAxiosError(error)) {
+    if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+      return 'The assistant request timed out. Your question is available to retry.'
+    }
+    if (!error.response) {
+      return 'Cannot reach the backend API. Confirm FastAPI is running and the frontend API URL is correct, then retry.'
+    }
+    if (error.response.status === 504) {
+      const detail = error.response.data?.detail
+      return detail && typeof detail.message === 'string'
+        ? detail.message
+        : 'The assistant took too long to respond. Please retry your question.'
+    }
     const detail = error.response?.data?.detail
     if (typeof detail === 'string') return detail
     if (detail && typeof detail.message === 'string') return detail.message
@@ -28,7 +40,7 @@ export function errorMessage(error: unknown): string {
 
 export const apiService = {
   stats: async () => (await api.get<PlatformStats>('/stats')).data,
-  health: async () => (await api.get<Record<string, unknown>>('/health')).data,
+  health: async () => (await api.get<SystemHealth>('/health')).data,
   formats: async () => (await api.get<{ formats: Record<string, string> }>('/supported-formats')).data.formats,
   documents: async (params: Record<string, string | number | undefined> = {}) =>
     (await api.get<DocumentPageResult>('/documents', { params })).data,
@@ -39,7 +51,7 @@ export const apiService = {
   upload: async (files: File[], onProgress?: (progress: number) => void) => {
     const data = new FormData()
     files.forEach(file => data.append('files', file))
-    return (await api.post<{ results: Array<{ document_id?: string; filename: string; status: string; error?: string; chunk_count?: number; duplicate?: boolean }> }>(
+    return (await api.post<{ results: Array<{ document_id?: string; filename: string; status: string; error?: string; chunk_count?: number; duplicate?: boolean; document_version?: number; previous_document_id?: string }>; insights_refresh_error?: string | null }>(
       '/documents/upload',
       data,
       { onUploadProgress: event => onProgress?.(event.total ? Math.round(event.loaded * 100 / event.total) : 0) },
@@ -62,4 +74,43 @@ export const apiService = {
     (await api.post<RiskAnalysis>('/analysis/risks', { document_ids })).data,
   blockerAnalysis: async (document_ids?: string[]) =>
     (await api.post<BlockerAnalysis>('/analysis/blockers', { document_ids })).data,
+  generateDocumentation: async (document_ids: string[]) =>
+    (await api.post<DocumentationResult>('/documentation/generate', { document_ids })).data,
+  documentationLatest: async (document_ids?: string[]) => {
+    try {
+      const params = new URLSearchParams()
+      document_ids?.forEach(id => params.append('document_ids', id))
+      return (await api.get<DocumentationResult>('/documentation/latest', {
+        params: document_ids ? params : undefined,
+      })).data
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) return null
+      throw error
+    }
+  },
+  documentationExport: async (id: string, format: 'csv' | 'json') =>
+    (await api.get<Blob>(`/documentation/${encodeURIComponent(id)}/export`, {
+      params: { format }, responseType: 'blob',
+    })).data,
+  recalculateProjectHealth: async () =>
+    (await api.post<ProjectHealthResult>('/project-health/recalculate')).data,
+  projectInsights: async () => (await api.get<ProjectInsightsResult>('/project-insights')).data,
+  projectHealthLatest: async () => {
+    try {
+      return (await api.get<ProjectHealthResult>('/project-health/latest')).data
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) return null
+      throw error
+    }
+  },
+  askAssistant: async (session_id: string, question: string, document_ids?: string[]) =>
+    (await api.post<AssistantResponse>('/assistant/chat', {
+      session_id, question, document_ids, top_k: 6,
+    }, { timeout: 100_000 })).data,
+  assistantConversation: async (session_id: string) =>
+    (await api.get<{ session_id: string; messages: AssistantMessage[] }>(
+      `/assistant/conversations/${encodeURIComponent(session_id)}`,
+    )).data.messages,
+  clearAssistantConversation: async (session_id: string) =>
+    (await api.delete(`/assistant/conversations/${encodeURIComponent(session_id)}`)).data,
 }

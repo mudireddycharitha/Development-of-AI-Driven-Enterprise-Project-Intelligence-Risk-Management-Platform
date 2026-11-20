@@ -2,9 +2,13 @@ import json
 import logging
 import re
 import uuid
+from functools import lru_cache
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from app.core.config import settings
 from app.database.db import connect
 from app.schemas.analysis import (
@@ -96,6 +100,37 @@ def _build_reference(
     )
 
 
+def _structured_deliverable_milestones(
+    document: dict[str, Any],
+    chunks: list[dict[str, Any]],
+) -> list[ScopeMilestone]:
+    milestones = []
+    for block in re.split(r"\n\s*\n", document.get("extracted_text") or ""):
+        fields = {
+            key.casefold(): value.strip()
+            for key, value in re.findall(
+                r"(?im)^\s*(Deliverable|Due date|Status):\s*(.*?)\s*$",
+                block,
+            )
+        }
+        due_dates = _find_dates(fields.get("due date", ""))
+        name = fields.get("deliverable")
+        if not name or not due_dates:
+            continue
+        status = fields.get("status") or "not stated"
+        description = f"{name}; due {due_dates[0]}; status {status}"
+        reference = _build_reference(document, block, chunks)
+        milestones.append(ScopeMilestone(
+            name=name,
+            date=due_dates[0],
+            status=status,
+            description=description,
+            source=document.get("filename"),
+            evidence=[reference] if reference.excerpt else [],
+        ))
+    return milestones
+
+
 def _load_documents(document_id: str | None = None, document_ids: list[str] | None = None) -> list[dict[str, Any]]:
     if document_id and document_ids:
         document_ids = [*dict.fromkeys([document_id, *document_ids])]
@@ -107,17 +142,21 @@ def _load_documents(document_id: str | None = None, document_ids: list[str] | No
         if document_ids:
             placeholders = ", ".join("?" for _ in document_ids)
             rows = connection.execute(
-                f"SELECT * FROM documents WHERE id IN ({placeholders}) ORDER BY uploaded_at DESC",
+                f"""SELECT * FROM documents WHERE id IN ({placeholders})
+                    AND processing_status = 'indexed' AND is_current_version = 1
+                    ORDER BY uploaded_at DESC""",
                 document_ids,
             ).fetchall()
         elif document_id:
             rows = connection.execute(
-                "SELECT * FROM documents WHERE id = ? ORDER BY uploaded_at DESC",
+                """SELECT * FROM documents WHERE id = ? AND processing_status = 'indexed'
+                   AND is_current_version = 1 ORDER BY uploaded_at DESC""",
                 (document_id,),
             ).fetchall()
         else:
             rows = connection.execute(
-                "SELECT * FROM documents WHERE processing_status = 'indexed' ORDER BY uploaded_at DESC"
+                """SELECT * FROM documents WHERE processing_status = 'indexed'
+                   AND is_current_version = 1 ORDER BY uploaded_at DESC"""
             ).fetchall()
     return [dict(row) for row in rows]
 
@@ -156,14 +195,21 @@ def _persist_analysis(analysis_type: str, document_ids: list[str], payload: dict
     return record_id
 
 
-def analyze_scope(document_id: str | None = None, document_ids: list[str] | None = None, query: str | None = None, top_k: int = 5) -> dict[str, Any]:
+def analyze_scope(
+    document_id: str | None = None,
+    document_ids: list[str] | None = None,
+    query: str | None = None,
+    top_k: int = 5,
+    persist: bool = True,
+) -> dict[str, Any]:
     documents = _load_documents(document_id=document_id, document_ids=document_ids)
     if not documents:
         payload = ScopeAnalysis(
             missing_information=["No indexed documents are available for scope extraction."],
             source_documents=[],
         ).model_dump(mode="json")
-        _persist_analysis("scope", [], payload)
+        if persist:
+            _persist_analysis("scope", [], payload)
         return payload
 
     goals: list[str] = []
@@ -183,6 +229,16 @@ def analyze_scope(document_id: str | None = None, document_ids: list[str] | None
         text = document.get("extracted_text") or ""
         sentences = _sentence_split(text)
         chunks = _load_chunks_for_document(document["id"])
+        for milestone in _structured_deliverable_milestones(document, chunks):
+            milestones.append(milestone)
+            findings.append(ScopeFinding(
+                id=f"scope-{len(findings) + 1}",
+                category="Milestone",
+                title=milestone.name or "Project milestone",
+                description=milestone.description or milestone.name or "Project milestone",
+                related_milestone=milestone.name,
+                evidence=milestone.evidence,
+            ))
         for sentence in sentences:
             normalized = sentence.strip()
             lower = normalized.lower()
@@ -221,7 +277,8 @@ def analyze_scope(document_id: str | None = None, document_ids: list[str] | None
                             description=normalized,
                             evidence=[reference] if reference.excerpt else [],
                         ))
-            if any(keyword in lower for keyword in ["milestone", "deadline", "target date", "due date", "launch date", "release date", "phase"]):
+            is_due_date_field = bool(re.fullmatch(r"due date\s*:\s*.+", lower))
+            if not is_due_date_field and any(keyword in lower for keyword in ["milestone", "deadline", "target date", "due date", "launch date", "release date", "phase"]):
                 milestone = ScopeMilestone(
                     name=normalized,
                     date=(_find_dates(normalized)[:1] or [None])[0],
@@ -331,11 +388,18 @@ def analyze_scope(document_id: str | None = None, document_ids: list[str] | None
         source_documents=sorted(set(source_documents)),
         notes=notes,
     ).model_dump(mode="json")
-    _persist_analysis("scope", [document["id"] for document in documents], payload)
+    if persist:
+        _persist_analysis("scope", [document["id"] for document in documents], payload)
     return payload
 
 
-def analyze_risks(document_id: str | None = None, document_ids: list[str] | None = None, query: str | None = None, top_k: int = 5) -> dict[str, Any]:
+def analyze_risks(
+    document_id: str | None = None,
+    document_ids: list[str] | None = None,
+    query: str | None = None,
+    top_k: int = 5,
+    persist: bool = True,
+) -> dict[str, Any]:
     documents = _load_documents(document_id=document_id, document_ids=document_ids)
     if not documents:
         payload = RiskAnalysis(
@@ -344,7 +408,8 @@ def analyze_risks(document_id: str | None = None, document_ids: list[str] | None
             source_documents=[],
             rules_used=["Date and status comparisons", "Dependency and blocker keyword detection"],
         ).model_dump(mode="json")
-        _persist_analysis("risk", [], payload)
+        if persist:
+            _persist_analysis("risk", [], payload)
         return payload
 
     findings: list[RiskFinding] = []
@@ -427,11 +492,18 @@ def analyze_risks(document_id: str | None = None, document_ids: list[str] | None
         source_documents=sorted(set(source_documents)),
         rules_used=rules_used,
     ).model_dump(mode="json")
-    _persist_analysis("risk", [document["id"] for document in documents], payload)
+    if persist:
+        _persist_analysis("risk", [document["id"] for document in documents], payload)
     return payload
 
 
-def analyze_blockers(document_id: str | None = None, document_ids: list[str] | None = None, query: str | None = None, top_k: int = 5) -> dict[str, Any]:
+def analyze_blockers(
+    document_id: str | None = None,
+    document_ids: list[str] | None = None,
+    query: str | None = None,
+    top_k: int = 5,
+    persist: bool = True,
+) -> dict[str, Any]:
     documents = _load_documents(document_id=document_id, document_ids=document_ids)
     if not documents:
         payload = BlockerAnalysis(
@@ -442,7 +514,8 @@ def analyze_blockers(document_id: str | None = None, document_ids: list[str] | N
             source_documents=[],
             notes=["Add documents before running this analysis."],
         ).model_dump(mode="json")
-        _persist_analysis("blockers", [], payload)
+        if persist:
+            _persist_analysis("blockers", [], payload)
         return payload
 
     blockers: list[BlockerItem] = []
@@ -462,6 +535,8 @@ def analyze_blockers(document_id: str | None = None, document_ids: list[str] | N
             lower = normalized.lower()
             is_pending_decision = any(keyword in lower for keyword in [
                 "pending decision", "decision required", "approval required", "needs approval",
+                "needs to approve", "need to approve", "must approve", "should approve",
+                "must be approved", "approval needed", "requires approval",
                 "must decide", "need to decide", "needs to decide", "should decide",
                 "decide which", "decide whether", "decide what", "decide who", "decide when",
                 "needs a decision", "decision is pending",
@@ -474,7 +549,7 @@ def analyze_blockers(document_id: str | None = None, document_ids: list[str] | N
                     normalized,
                     flags=re.IGNORECASE,
                 )
-            )
+                )
             is_blocker = any(keyword in lower for keyword in [
                 "blocker", "blocked", "issue", "waiting on", "waiting for", "awaiting",
                 "delayed because", "is delayed", "are delayed", "behind schedule",
@@ -511,6 +586,14 @@ def analyze_blockers(document_id: str | None = None, document_ids: list[str] | N
                     r"^\s*(?:\d+[.)]\s*)?([A-Z][a-z][A-Za-z'-]*)\s+"
                     r"(?:must|will|should|needs? to|has to|have to)\b",
                     normalized,
+                )
+            if not assignee_match and is_action_item:
+                assignee_match = re.search(
+                    r"^\s*(?:\d+[.)]\s*)?(?:action\s+item\s*[:\-]\s*)?"
+                    r"(?:the\s+)?([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})\s+"
+                    r"(?:must|will|should|needs? to|has to|have to)\b",
+                    normalized,
+                    flags=re.IGNORECASE,
                 )
             if assignee_match:
                 assignee = assignee_match.group(1).strip().rstrip(".,;")
@@ -562,7 +645,8 @@ def analyze_blockers(document_id: str | None = None, document_ids: list[str] | N
         source_documents=sorted(set(source_documents)),
         notes=notes,
     ).model_dump(mode="json")
-    _persist_analysis("blockers", [document["id"] for document in documents], payload)
+    if persist:
+        _persist_analysis("blockers", [document["id"] for document in documents], payload)
     return payload
 
 
@@ -579,40 +663,240 @@ def resolve_analysis_request(body: AnalysisRequest | None = None, document_id: s
     }
 
 
-def maybe_call_llm(prompt: str, context: str) -> str | None:
+class LLMConfigurationError(RuntimeError):
+    pass
+
+
+class LLMGenerationError(RuntimeError):
+    pass
+
+
+class LLMTimeoutError(LLMGenerationError):
+    pass
+
+
+@lru_cache(maxsize=3)
+def _openai_client(api_key: str, timeout_seconds: float) -> Any:
+    import openai
+
+    return openai.OpenAI(api_key=api_key, timeout=timeout_seconds, max_retries=1)
+
+
+@lru_cache(maxsize=3)
+def _azure_openai_client(api_key: str, endpoint: str, timeout_seconds: float) -> Any:
+    from openai import AzureOpenAI
+
+    return AzureOpenAI(
+        api_key=api_key,
+        api_version="2024-02-01",
+        azure_endpoint=endpoint,
+        timeout=timeout_seconds,
+        max_retries=1,
+    )
+
+
+@lru_cache(maxsize=3)
+def _ollama_http_client(base_url: str, timeout_seconds: float) -> httpx.Client:
+    return httpx.Client(
+        base_url=base_url,
+        timeout=httpx.Timeout(timeout_seconds),
+        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+    )
+
+
+def _is_timeout_error(error: Exception) -> bool:
+    current: BaseException | None = error
+    while current is not None:
+        if isinstance(current, (httpx.TimeoutException, TimeoutError)):
+            return True
+        if type(current).__name__ in {"APITimeoutError", "ReadTimeout", "ConnectTimeout"}:
+            return True
+        current = current.__cause__
+    return False
+
+
+def maybe_call_llm(prompt: str, context: str) -> str:
     provider = settings.ai_provider
     if provider == "rule_based":
-        return None
-    if provider == "openai" and settings.openai_api_key:
-        try:
-            import openai
+        raise LLMConfigurationError(
+            "The assistant LLM is disabled. Set AI_PROVIDER=openai and configure OPENAI_API_KEY, "
+            "or configure Ollama or Azure OpenAI in the backend environment."
+        )
+    if provider not in {"openai", "azure", "ollama"}:
+        raise LLMConfigurationError(
+            f"Unsupported AI_PROVIDER '{provider}'. Choose 'ollama', 'openai', or 'azure'."
+        )
+    if provider == "openai" and not settings.openai_api_key_configured:
+        raise LLMConfigurationError(
+            "AI_PROVIDER=openai but OPENAI_API_KEY is not configured. Set it in the repository-root "
+            ".env file or the backend process environment, then restart FastAPI."
+        )
+    if provider == "azure" and not settings.azure_openai_api_key_configured:
+        raise LLMConfigurationError(
+            "AI_PROVIDER=azure but AZURE_OPENAI_API_KEY is not configured. Set it in the "
+            "repository-root .env file or the backend process environment, then restart FastAPI."
+        )
+    if provider == "azure" and not settings.azure_openai_endpoint:
+        raise LLMConfigurationError(
+            "AI_PROVIDER=azure but AZURE_OPENAI_ENDPOINT is not configured."
+        )
+    if provider == "azure" and not settings.azure_openai_deployment:
+        raise LLMConfigurationError(
+            "AI_PROVIDER=azure but AZURE_OPENAI_DEPLOYMENT is not configured."
+        )
+    if provider == "ollama":
+        if not settings.ollama_model:
+            raise LLMConfigurationError(
+                "AI_PROVIDER=ollama but OLLAMA_MODEL is not configured. Set it to a model already installed in Ollama."
+            )
+        ollama_url = urlparse(settings.ollama_base_url)
+        if (
+            ollama_url.scheme not in {"http", "https"}
+            or not ollama_url.hostname
+            or ollama_url.username
+            or ollama_url.password
+        ):
+            raise LLMConfigurationError(
+                "OLLAMA_BASE_URL must be an HTTP or HTTPS URL."
+            )
 
-            client = openai.OpenAI(api_key=settings.openai_api_key)
+    try:
+        timeout_seconds = settings.llm_request_timeout_seconds
+    except ValueError as error:
+        raise LLMConfigurationError(str(error)) from error
+
+    started = perf_counter()
+    try:
+        if provider == "openai":
+            client = _openai_client(settings.openai_api_key, timeout_seconds)
             response = client.responses.create(
                 model=settings.openai_model,
-                input=[{"role": "user", "content": f"{prompt}\n\nContext:\n{context[:12000]}"}],
+                instructions=prompt,
+                input=f"Retrieved project evidence:\n{context[:24000]}",
+                max_output_tokens=384,
             )
-            return getattr(response, "output_text", None) or str(response)
-        except Exception as error:  # pragma: no cover - optional path
-            logger.warning("OpenAI LLM integration could not be loaded: %s", error)
-            return None
-    if provider == "azure" and settings.azure_openai_api_key and settings.azure_openai_endpoint:
-        try:
-            import os
-
-            from openai import AzureOpenAI
-
-            client = AzureOpenAI(
-                api_key=settings.azure_openai_api_key,
-                api_version="2024-02-01",
-                azure_endpoint=settings.azure_openai_endpoint,
+            if (
+                getattr(response, "status", None) == "incomplete"
+                or getattr(response, "incomplete_details", None) is not None
+            ):
+                raise LLMGenerationError(
+                    "The configured OpenAI service returned an incomplete answer. Please retry the question."
+                )
+            answer = getattr(response, "output_text", None)
+        elif provider == "azure":
+            client = _azure_openai_client(
+                settings.azure_openai_api_key,
+                settings.azure_openai_endpoint,
+                timeout_seconds,
             )
             response = client.responses.create(
-                model=settings.azure_openai_deployment or settings.openai_model,
-                input=[{"role": "user", "content": f"{prompt}\n\nContext:\n{context[:12000]}"}],
+                model=settings.azure_openai_deployment,
+                instructions=prompt,
+                input=f"Retrieved project evidence:\n{context[:24000]}",
+                max_output_tokens=384,
             )
-            return getattr(response, "output_text", None) or str(response)
-        except Exception as error:  # pragma: no cover - optional path
-            logger.warning("Azure OpenAI integration could not be loaded: %s", error)
-            return None
-    return None
+            if (
+                getattr(response, "status", None) == "incomplete"
+                or getattr(response, "incomplete_details", None) is not None
+            ):
+                raise LLMGenerationError(
+                    "The configured Azure OpenAI service returned an incomplete answer. Please retry the question."
+                )
+            answer = getattr(response, "output_text", None)
+        else:
+            response = _ollama_http_client(
+                settings.ollama_base_url,
+                timeout_seconds,
+            ).post(
+                "/api/chat",
+                json={
+                    "model": settings.ollama_model,
+                    "stream": False,
+                    "keep_alive": "10m",
+                    "options": {
+                        "temperature": 0,
+                        "top_p": 0.65,
+                        "num_ctx": 4096,
+                        "num_predict": 192,
+                    },
+                    "messages": [
+                        {"role": "system", "content": prompt},
+                        {
+                            "role": "user",
+                            "content": f"Retrieved project evidence:\n{context[:24000]}",
+                        },
+                    ],
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            if not isinstance(result, dict):
+                raise ValueError("Ollama returned an invalid response.")
+            if result.get("done_reason") == "length":
+                raise LLMGenerationError(
+                    "The configured Ollama service returned an incomplete answer. Narrow the question and retry."
+                )
+            message = result.get("message")
+            answer = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(answer, str) or not answer.strip():
+            raise LLMGenerationError("The configured LLM returned an empty answer. Please retry.")
+        provider_duration_ms = (
+            result.get("total_duration", 0) / 1_000_000
+            if provider == "ollama" and isinstance(result.get("total_duration"), (int, float))
+            else None
+        )
+        prompt_eval_ms = (
+            result.get("prompt_eval_duration", 0) / 1_000_000
+            if provider == "ollama" and isinstance(result.get("prompt_eval_duration"), (int, float))
+            else None
+        )
+        eval_ms = (
+            result.get("eval_duration", 0) / 1_000_000
+            if provider == "ollama" and isinstance(result.get("eval_duration"), (int, float))
+            else None
+        )
+        logger.info(
+            "LLM generation completed provider=%s model=%s duration_ms=%.1f "
+            "provider_total_ms=%s prompt_eval_ms=%s eval_ms=%s prompt_eval_tokens=%s "
+            "eval_tokens=%s done_reason=%s prompt_chars=%d context_chars=%d output_chars=%d",
+            provider,
+            settings.openai_model if provider == "openai" else (
+                settings.azure_openai_deployment if provider == "azure" else settings.ollama_model
+            ),
+            (perf_counter() - started) * 1000,
+            f"{provider_duration_ms:.1f}" if provider_duration_ms is not None else "unavailable",
+            f"{prompt_eval_ms:.1f}" if prompt_eval_ms is not None else "unavailable",
+            f"{eval_ms:.1f}" if eval_ms is not None else "unavailable",
+            result.get("prompt_eval_count", "unavailable") if provider == "ollama" else "unavailable",
+            result.get("eval_count", "unavailable") if provider == "ollama" else "unavailable",
+            result.get("done_reason", "unavailable") if provider == "ollama" else "unavailable",
+            len(prompt),
+            len(context[:24000]),
+            len(answer),
+        )
+        return answer.strip()
+    except (LLMConfigurationError, LLMGenerationError):
+        raise
+    except ModuleNotFoundError as error:
+        logger.exception("Configured LLM provider SDK is unavailable")
+        raise LLMConfigurationError(
+            "The OpenAI SDK is not installed. Install backend requirements and restart the API."
+        ) from error
+    except Exception as error:
+        if _is_timeout_error(error):
+            elapsed_seconds = perf_counter() - started
+            logger.warning(
+                "LLM generation timed out provider=%s duration_seconds=%.1f timeout_seconds=%.1f",
+                provider,
+                elapsed_seconds,
+                timeout_seconds,
+            )
+            raise LLMTimeoutError(
+                f"The configured {provider} answer-generation service timed out after "
+                f"{timeout_seconds:g} seconds. Retry the question."
+            ) from error
+        logger.exception("Configured %s answer generation failed", provider)
+        raise LLMGenerationError(
+            f"The configured {provider} answer-generation service could not complete the request. "
+            "Check provider access, model/deployment name, quota, and API logs, then retry."
+        ) from error

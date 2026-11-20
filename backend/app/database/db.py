@@ -26,7 +26,10 @@ def initialize_database() -> None:
                 failed_stage TEXT,
                 extracted_text TEXT NOT NULL DEFAULT '',
                 chunk_count INTEGER NOT NULL DEFAULT 0,
-                indexed_chunk_count INTEGER NOT NULL DEFAULT 0
+                indexed_chunk_count INTEGER NOT NULL DEFAULT 0,
+                version_of_document_id TEXT,
+                document_version INTEGER NOT NULL DEFAULT 1,
+                is_current_version INTEGER NOT NULL DEFAULT 1
             );
             CREATE INDEX IF NOT EXISTS idx_documents_uploaded_at ON documents(uploaded_at);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_sha256 ON documents(sha256);
@@ -52,8 +55,57 @@ def initialize_database() -> None:
                 result_json TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_analysis_results_type ON analysis_results(analysis_type, created_at);
+            CREATE TABLE IF NOT EXISTS documentation_generations (
+                id TEXT PRIMARY KEY,
+                generation_key TEXT NOT NULL UNIQUE,
+                document_ids TEXT NOT NULL DEFAULT '[]',
+                generated_at TEXT NOT NULL,
+                result_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS project_health_scores (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                result_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_health_created_at
+                ON project_health_scores(created_at);
+            CREATE TABLE IF NOT EXISTS assistant_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                sources_json TEXT NOT NULL DEFAULT '[]',
+                answer_mode TEXT,
+                health_json TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_assistant_messages_session
+                ON assistant_messages(session_id, id);
             """
         )
+        document_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        if "version_of_document_id" not in document_columns:
+            connection.execute("ALTER TABLE documents ADD COLUMN version_of_document_id TEXT")
+        if "document_version" not in document_columns:
+            connection.execute(
+                "ALTER TABLE documents ADD COLUMN document_version INTEGER NOT NULL DEFAULT 1"
+            )
+        if "is_current_version" not in document_columns:
+            connection.execute(
+                "ALTER TABLE documents ADD COLUMN is_current_version INTEGER NOT NULL DEFAULT 1"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_documents_current_version ON documents(is_current_version, processing_status)"
+        )
+        assistant_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(assistant_messages)").fetchall()
+        }
+        if "answer_mode" not in assistant_columns:
+            connection.execute("ALTER TABLE assistant_messages ADD COLUMN answer_mode TEXT")
+        if "health_json" not in assistant_columns:
+            connection.execute("ALTER TABLE assistant_messages ADD COLUMN health_json TEXT")
         connection.execute("PRAGMA foreign_keys = ON")
 
 

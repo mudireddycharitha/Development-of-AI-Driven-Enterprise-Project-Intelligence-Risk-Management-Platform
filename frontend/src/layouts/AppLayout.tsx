@@ -1,24 +1,28 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Activity, Blocks, BookOpenText, Boxes, CircleHelp, Files, Gauge, Menu, Search, Settings, ShieldAlert, Target, Upload, Workflow, X, ListChecks } from 'lucide-react'
+import { Activity, Blocks, BookOpenText, Boxes, CircleHelp, Files, Gauge, Menu, Search, Settings, ShieldAlert, Target, Upload, Workflow, X, ListChecks, FileOutput, HeartPulse, MessagesSquare, ChartNoAxesCombined } from 'lucide-react'
 import { apiService } from '../services/api'
+import type { SystemHealth } from '../types'
 
 const navigationGroups = [
   { title: 'WORKSPACE', items: [
     { to: '/', label: 'Overview', icon: Gauge, end: true },
     { to: '/documents', label: 'Documents', icon: Files },
     { to: '/search', label: 'Semantic search', icon: Search },
-    { to: '/upload', label: 'Upload documents', icon: Upload },
+    { to: '/upload', label: 'Document upload', icon: Upload },
   ] },
-  { title: 'PROJECT AGENTS', items: [
+  { title: 'PROJECT INTELLIGENCE', items: [
     { to: '/project-intelligence?view=scope', label: 'Scope & Deliverables', icon: Target },
     { to: '/project-intelligence?view=risks', label: 'Risk Intelligence', icon: ShieldAlert },
     { to: '/project-intelligence?view=blockers', label: 'Blockers & Actions', icon: ListChecks },
+    { to: '/documentation', label: 'Documentation generation', icon: FileOutput },
+    { to: '/project-health', label: 'Project health', icon: HeartPulse },
+    { to: '/assistant', label: 'Project assistant', icon: MessagesSquare },
   ] },
-  { title: 'TOOLS', items: [
+  { title: 'ANALYTICS & INSIGHTS', items: [
+    { to: '/project-insights', label: 'Project insights', icon: ChartNoAxesCombined },
     { to: '/chunks', label: 'Chunk explorer', icon: Blocks },
     { to: '/embeddings', label: 'Embeddings', icon: Boxes },
-    { to: '/settings', label: 'System status', icon: Settings },
   ] },
 ]
 const navigation = navigationGroups.flatMap(group => group.items)
@@ -27,19 +31,23 @@ export function AppLayout() {
   const location = useLocation()
   const navigate = useNavigate()
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [backendStatus, setBackendStatus] = useState<'healthy' | 'unavailable'>('unavailable')
+  const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null)
   const currentPage = location.pathname === '/project-intelligence'
     ? ({ scope: 'Scope & Deliverables', risks: 'Risk Intelligence', blockers: 'Blockers & Actions' }[new URLSearchParams(location.search).get('view') ?? ''] ?? 'Project Intelligence')
-    : navigation.find(item => item.to.split('?')[0] === location.pathname)?.label ?? 'Workspace'
+    : location.pathname.startsWith('/documents/') ? 'Document details'
+      : location.pathname === '/settings' ? 'System status'
+        : navigation.find(item => item.to.split('?')[0] === location.pathname)?.label ?? 'Workspace'
 
   useEffect(() => {
     let active = true
-    apiService.health().then(result => {
-      if (active) setBackendStatus(result.status === 'healthy' ? 'healthy' : 'unavailable')
-    }).catch(() => {
-      if (active) setBackendStatus('unavailable')
-    })
-    return () => { active = false }
+    const refreshStatus = () => {
+      apiService.health()
+        .then(result => { if (active) setSystemHealth(result) })
+        .catch(() => { if (active) setSystemHealth(null) })
+    }
+    refreshStatus()
+    const interval = window.setInterval(refreshStatus, 30_000)
+    return () => { active = false; window.clearInterval(interval) }
   }, [])
   useEffect(() => {
     const handleSearchShortcut = (event: KeyboardEvent) => {
@@ -55,11 +63,13 @@ export function AppLayout() {
   return <div className="app-shell">
     {sidebarOpen && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />}
     <aside className={`sidebar${sidebarOpen ? ' sidebar-open' : ''}`}>
-      <NavLink to="/" className="brand">
-        <span className="brand-mark"><Workflow size={21} /></span>
-        <span><strong>Project Intelligence</strong><small>AI PROJECT WORKSPACE</small></span>
-        <button className="sidebar-close" aria-label="Close navigation" onClick={event => { event.preventDefault(); setSidebarOpen(false) }}><X size={17} /></button>
-      </NavLink>
+      <div className="brand">
+        <NavLink to="/" className="brand-home">
+          <span className="brand-mark"><Workflow size={21} /></span>
+          <span><strong>Project Intelligence</strong><small>INTELLIGENCE PLATFORM</small></span>
+        </NavLink>
+        <button className="sidebar-close" aria-label="Close navigation" onClick={() => setSidebarOpen(false)}><X size={17} /></button>
+      </div>
       <nav>{navigationGroups.map(group => <section className="sidebar-nav-group" key={group.title}>
         <div className="nav-caption">{group.title}</div>
         {group.items.map(({ to, label, icon: Icon, end }) =>
@@ -72,7 +82,11 @@ export function AppLayout() {
           </NavLink>)}
       </section>)}</nav>
       <div className="sidebar-bottom">
-        <div className="sidebar-health"><Activity size={16} /><span>Backend service</span><i className={`health-${backendStatus}`} /></div>
+        <div className="sidebar-health"><Activity size={16} /><span>Backend health</span><i className={`health-${systemHealth?.status === 'healthy' ? 'healthy' : 'unavailable'}`} /></div>
+        <NavLink to="/settings" onClick={() => setSidebarOpen(false)}
+          className={({ isActive }) => `nav-link settings-link${isActive ? ' active' : ''}`}>
+          <Settings size={18} strokeWidth={1.8} /><span>System status</span>
+        </NavLink>
         <div className="help-label"><CircleHelp size={15} /> Local-first project workspace</div>
       </div>
     </aside>
@@ -81,7 +95,18 @@ export function AppLayout() {
         <button className="mobile-menu" aria-label="Open navigation" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button>
         <div className="breadcrumb"><BookOpenText size={16} /><span>Project Intelligence</span><span>/</span><strong>{currentPage}</strong></div>
         <NavLink to="/search" className="topbar-search"><Search size={15} /><span>Search workspace</span><kbd>Ctrl K</kbd></NavLink>
-        <div className={`topbar-status ${backendStatus}`}><i /> {backendStatus === 'healthy' ? 'API CONNECTED' : 'API UNAVAILABLE'}</div>
+        <div className="topbar-statuses" aria-label="System connectivity">
+          <NavLink to="/settings" className={`topbar-status ${systemHealth?.api_status === 'online' ? 'healthy' : 'unavailable'}`}
+            title={systemHealth ? `API ${systemHealth.status}; database ${systemHealth.database}; vector store ${systemHealth.vector_store}` : 'Backend API unavailable'}
+            aria-label={systemHealth ? `API ${systemHealth.status}` : 'Backend API unavailable'}>
+            <i /> API {systemHealth?.api_status === 'online' ? 'CONNECTED' : 'UNAVAILABLE'}
+          </NavLink>
+          <NavLink to="/settings" className={`topbar-status ${systemHealth?.ai_provider.operational ? 'healthy' : systemHealth?.ai_provider.configured ? 'configured' : 'unavailable'}`}
+            title={systemHealth?.ai_provider.message ?? 'AI provider status unavailable'}
+            aria-label={`AI provider ${systemHealth?.ai_provider.status ?? 'status unavailable'}`}>
+            <i /> AI {systemHealth?.ai_provider.operational ? 'OPERATIONAL' : systemHealth?.ai_provider.configured ? 'CONFIGURED' : 'UNAVAILABLE'}
+          </NavLink>
+        </div>
       </header>
       <div className="content-area"><Outlet /></div>
     </main>

@@ -1,55 +1,70 @@
-import { useEffect, useState, type ReactNode } from 'react'
-import { ArrowUpRight, Blocks, CheckSquare, FileCheck2, FileText, Files, RefreshCw, ShieldAlert, TriangleAlert } from 'lucide-react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { ArrowUpRight, Blocks, CheckSquare, FileCheck2, FileText, Files, HeartPulse, RefreshCw, ShieldAlert, TriangleAlert } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { apiService, errorMessage } from '../services/api'
-import type { PlatformStats } from '../types'
+import type { PlatformStats, ProjectInsightsResult } from '../types'
 import { EmptyState, ErrorState, Loading, PageHeading, StatusBadge, formatBytes, formatDate } from '../components/Shared'
 
 export function Dashboard() {
   const [stats, setStats] = useState<PlatformStats | null>(null)
-  const [agentCounts, setAgentCounts] = useState<{ deliverables: number | null; risks: number | null; blockers: number | null; actions: number | null }>({
-    deliverables: null, risks: null, blockers: null, actions: null,
-  })
+  const [insights, setInsights] = useState<ProjectInsightsResult | null>(null)
   const [error, setError] = useState('')
+  const [insightsError, setInsightsError] = useState('')
   const [loading, setLoading] = useState(true)
-  const load = () => {
-    setLoading(true); setError('')
-    apiService.stats().then(async result => {
-      setStats(result)
-      if (!result.successful_documents) {
-        setAgentCounts({ deliverables: 0, risks: 0, blockers: 0, actions: 0 })
-        return
-      }
-      const documents = await apiService.documents({ page: 1, page_size: 100, status: 'indexed' })
-      const ids = documents.items.map(item => item.id)
-      const [scope, risks, blockers] = await Promise.allSettled([
-        apiService.scopeAnalysis(ids),
-        apiService.riskAnalysis(ids),
-        apiService.blockerAnalysis(ids),
-      ])
-      setAgentCounts({
-        deliverables: scope.status === 'fulfilled' ? scope.value.deliverables.length : null,
-        risks: risks.status === 'fulfilled' ? risks.value.findings.length : null,
-        blockers: blockers.status === 'fulfilled' ? blockers.value.blockers.length : null,
-        actions: blockers.status === 'fulfilled' ? blockers.value.action_items.length : null,
-      })
-    }).catch(e => setError(errorMessage(e))).finally(() => setLoading(false))
-  }
-  useEffect(load, [])
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    setInsightsError('')
+    const [statsResult, insightsResult] = await Promise.allSettled([
+      apiService.stats(),
+      apiService.projectInsights(),
+    ])
+    if (statsResult.status === 'fulfilled') setStats(statsResult.value)
+    else {
+      setStats(null)
+      setError(errorMessage(statsResult.reason))
+    }
+    if (insightsResult.status === 'fulfilled') setInsights(insightsResult.value)
+    else {
+      setInsights(null)
+      setInsightsError(errorMessage(insightsResult.reason))
+    }
+    setLoading(false)
+  }, [])
+  useEffect(() => {
+    void load()
+    const refresh = () => { if (!document.hidden) void load() }
+    const interval = window.setInterval(refresh, 30_000)
+    window.addEventListener('focus', refresh)
+    return () => {
+      window.clearInterval(interval)
+      window.removeEventListener('focus', refresh)
+    }
+  }, [load])
   return <>
-    <PageHeading eyebrow="PROJECT INTELLIGENCE" title="Project Intelligence Dashboard"
-      description="Transform project documents into actionable insights."
-      action={<button className="button button-quiet" onClick={load}><RefreshCw size={15} /> Refresh</button>} />
+    <PageHeading eyebrow="WORKSPACE" title="Overview"
+      description="A current view of your indexed project knowledge and delivery signals."
+      action={<button className="button button-quiet" onClick={() => void load()} disabled={loading}><RefreshCw size={15} /> Refresh</button>} />
     {loading && <Loading />}
     {error && <ErrorState message={error} />}
+    {insightsError && <ErrorState message={`Project agent insights are unavailable: ${insightsError}`} />}
+    {insights && <section className="metric-grid">
+      <Metric title="Documents uploaded" value={insights.metrics.total_uploaded_documents} icon={<Files />} detail="Includes retained document versions" />
+      <Metric title="Documents processed" value={insights.metrics.processed_documents} icon={<FileText />} detail={`${insights.metrics.current_indexed_documents} current indexed sources`} tone="blue" />
+      <Metric title="Identified risks" value={insights.metrics.total_risks} icon={<ShieldAlert />} detail="Current Risk Intelligence Agent findings" tone="amber" />
+      <Metric title="Total blockers" value={insights.metrics.total_blockers} icon={<TriangleAlert />} detail={`${insights.blocker_counts.unresolved} unresolved`} tone="amber" />
+      <Metric title="Action items" value={insights.metrics.total_actions} icon={<CheckSquare />} detail={`${insights.action_counts.pending + insights.action_counts.overdue} pending or overdue`} tone="blue" />
+      <Metric title="Deliverables" value={insights.metrics.total_deliverables} icon={<FileCheck2 />} detail="Extracted by Scope & Deliverables Agent" tone="green" />
+      <Metric title="Project health" value={insights.metrics.overall_project_health_score === null
+        ? insights.project_status
+        : `${Math.round(insights.metrics.overall_project_health_score)} / 100`}
+        icon={<HeartPulse />} detail={insights.project_status} tone="blue" />
+      <Metric title="Generated documentation" value={insights.documentation.is_current
+        ? insights.documentation.total_generated_items : 'Not generated'}
+        icon={<FileText />} detail="Latest generation for current indexed sources" />
+      <div className="overview-insights-link"><Link className="text-link" to="/project-insights">Open Project Insights <ArrowUpRight size={14} /></Link></div>
+    </section>}
     {stats && <>
-      <section className="metric-grid">
-        <Metric title="Documents processed" value={stats.successful_documents} icon={<Files />} detail={`${stats.indexed_chunks ?? 'Unavailable'} chunks indexed`} />
-        <Metric title="Project deliverables" value={agentCounts.deliverables ?? 'Unavailable'} icon={<FileCheck2 />} detail="Extracted from indexed documents" tone="green" />
-        <Metric title="Identified risks" value={agentCounts.risks ?? 'Unavailable'} icon={<ShieldAlert />} detail="Evidence-backed findings" tone="amber" />
-        <Metric title="Open blockers" value={agentCounts.blockers ?? 'Unavailable'} icon={<TriangleAlert />} detail="Reported in project documents" tone="amber" />
-        <Metric title="Pending action items" value={agentCounts.actions ?? 'Unavailable'} icon={<CheckSquare />} detail="Assigned actions identified" tone="blue" />
-      </section>
       <div className="overview-grid">
         <section className="panel">
           <div className="panel-heading"><div><h2>Recent documents</h2><p>Latest uploads and processing outcomes</p></div>

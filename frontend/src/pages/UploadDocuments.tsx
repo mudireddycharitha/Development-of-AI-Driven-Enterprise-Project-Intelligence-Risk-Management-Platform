@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom'
 import { apiService, errorMessage } from '../services/api'
 import { formatBytes, PageHeading } from '../components/Shared'
 
-type UploadOutcome = { document_id?: string; filename: string; status: string; error?: string; chunk_count?: number; duplicate?: boolean }
+type UploadOutcome = { document_id?: string; filename: string; status: string; error?: string; chunk_count?: number; duplicate?: boolean; document_version?: number; previous_document_id?: string }
 
 export function UploadDocuments() {
   const input = useRef<HTMLInputElement>(null)
@@ -40,6 +40,7 @@ export function UploadDocuments() {
     try {
       const result = await apiService.upload(batch, setProgress)
       setOutcomes(result.results)
+      if (result.insights_refresh_error) setError(`Documents were processed, but project insights could not be refreshed: ${result.insights_refresh_error}`)
       setFiles(current => current.filter(file => !batch.includes(file)))
     } catch (e) { setError(errorMessage(e)) }
     finally { setBusy(false); setProgress(100) }
@@ -58,7 +59,7 @@ export function UploadDocuments() {
       else setError(`The original file ${outcome.filename} is no longer selected. Add it again to retry.`)
     }
   }
-  const successful = outcomes.filter(item => item.status === 'indexed').length
+  const successful = outcomes.filter(item => item.status === 'indexed' || item.status === 'updated').length
   const failed = outcomes.filter(item => item.status === 'failed').length
   return <>
     <PageHeading eyebrow="DOCUMENT INGESTION" title="Upload documents"
@@ -91,12 +92,14 @@ export function UploadDocuments() {
       </div>}
     </section>
     {outcomes.length > 0 && <section className="panel results-panel">
-      <div className="panel-heading"><div><h2>Batch results</h2><p>{successful} indexed · {failed} failed</p></div>
+      <div className="panel-heading"><div><h2>Batch results</h2><p>{successful} indexed or updated · {failed} failed</p></div>
         <button className="button button-quiet" onClick={() => navigate('/documents')}>View documents</button></div>
       <div className="upload-results">{outcomes.map((item, index) => <div className="result-row" key={`${item.filename}-${index}`}>
-        <span className={`result-icon ${item.status === 'indexed' ? 'success' : 'failure'}`}>{item.status === 'indexed' ? <Check size={16} /> : <span>!</span>}</span>
-        <div className="selected-name"><strong>{item.filename}</strong><small>{item.status === 'indexed'
-          ? item.duplicate ? `Already uploaded; existing document reused · ${item.chunk_count ?? 0} chunks indexed` : `${item.chunk_count ?? 0} chunks indexed`
+        <span className={`result-icon ${item.status === 'indexed' || item.status === 'updated' ? 'success' : 'failure'}`}>{item.status === 'indexed' || item.status === 'updated' ? <Check size={16} /> : <span>!</span>}</span>
+        <div className="selected-name"><strong>{item.filename}</strong><small>{item.status === 'indexed' || item.status === 'updated'
+          ? item.duplicate ? `Already uploaded; existing version reused · ${item.chunk_count ?? 0} chunks indexed`
+            : item.status === 'updated' ? `New version ${item.document_version ?? ''} indexed · ${item.chunk_count ?? 0} chunks · previous version retained`
+              : `${item.chunk_count ?? 0} chunks indexed`
           : item.error ?? 'Processing failed'}</small></div>
         {item.status === 'failed' && <button className="button button-quiet" disabled={retrying === item.filename} onClick={() => void retry(item)}>
           {retrying === item.filename ? <LoaderCircle className="spin" size={15} /> : <RotateCcw size={15} />} Retry

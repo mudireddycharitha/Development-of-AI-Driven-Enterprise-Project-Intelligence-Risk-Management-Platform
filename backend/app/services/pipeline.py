@@ -141,6 +141,16 @@ def process_document(document_id: str) -> dict[str, Any]:
             result = row_dict(connection.execute(
                 "SELECT * FROM documents WHERE id = ?", (document_id,)
             ).fetchone())
+            if result and result["processing_status"] == "indexed":
+                connection.execute(
+                    """UPDATE documents SET is_current_version = 0
+                       WHERE lower(filename) = lower(?) AND id != ? AND is_current_version = 1""",
+                    (document["filename"], document_id),
+                )
+                connection.execute(
+                    "UPDATE documents SET is_current_version = 1 WHERE id = ?",
+                    (document_id,),
+                )
         return result or {}
     except Exception as error:
         stage = "processing"

@@ -4,6 +4,7 @@ from typing import Any
 import chromadb
 
 from app.core.config import settings
+from app.database.db import connect
 
 _client: Any = None
 _collection: Any = None
@@ -94,20 +95,49 @@ def get_embedding(chunk_id: str) -> tuple[list[float], dict[str, Any]] | None:
 
 
 def query(
-    vector: list[float], top_k: int, document_id: str | None = None, file_type: str | None = None
+    vector: list[float], top_k: int, document_id: str | None = None, file_type: str | None = None,
+    document_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    with connect() as connection:
+        active_document_ids = [
+            row["id"] for row in connection.execute(
+                """SELECT id FROM documents
+                   WHERE processing_status = 'indexed' AND is_current_version = 1"""
+            ).fetchall()
+        ]
+    if not active_document_ids:
+        return []
+
     conditions = []
-    if document_id:
+    selected_ids = list(dict.fromkeys(item for item in (document_ids or []) if item))
+    allowed_ids = set(active_document_ids)
+    if document_id and selected_ids:
+        if document_id not in selected_ids:
+            return []
+        if document_id not in allowed_ids:
+            return []
         conditions.append({"document_id": document_id})
+    elif document_id:
+        if document_id not in allowed_ids:
+            return []
+        conditions.append({"document_id": document_id})
+    elif selected_ids:
+        selected_ids = [item for item in selected_ids if item in allowed_ids]
+        if not selected_ids:
+            return []
+        conditions.append({"document_id": {"$in": selected_ids}})
+    else:
+        conditions.append({"document_id": {"$in": active_document_ids}})
     if file_type:
         conditions.append({"file_type": file_type.lower().lstrip(".")})
     where = conditions[0] if len(conditions) == 1 else ({"$and": conditions} if conditions else None)
     collection = get_collection()
-    if collection.count() == 0:
+    collection_size = collection.count()
+    if collection_size == 0:
         return []
     result = collection.query(
         query_embeddings=[vector],
-        n_results=min(top_k, collection.count()),
+        n_results=min(top_k, collection_size),
         where=where,
         include=["documents", "metadatas", "distances"],
     )

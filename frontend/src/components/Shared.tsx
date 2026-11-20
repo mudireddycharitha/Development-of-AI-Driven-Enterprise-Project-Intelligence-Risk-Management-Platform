@@ -5,7 +5,7 @@ export function PageHeading({ eyebrow, title, description, action }: {
   eyebrow?: string; title: string; description?: string; action?: ReactNode
 }) {
   return <div className="page-heading">
-    <div><div className="eyebrow">{eyebrow ?? 'INTELLIGENCE WORKSPACE'}</div><h1>{title}</h1>
+    <div className="page-heading-copy"><div className="eyebrow">{eyebrow ?? 'INTELLIGENCE WORKSPACE'}</div><h1>{title}</h1>
       {description && <p>{description}</p>}</div>
     {action && <div className="heading-action">{action}</div>}
   </div>
@@ -17,7 +17,10 @@ export function StatusBadge({ status }: { status?: string }) {
 }
 
 export function Loading({ label = 'Loading workspace data…' }: { label?: string }) {
-  return <div className="state-card"><LoaderCircle className="spin" size={22} />{label}</div>
+  return <div className="state-card loading-state" role="status" aria-live="polite">
+    <LoaderCircle className="spin" size={18} /><span>{label}</span>
+    <span className="loading-skeleton" aria-hidden="true" />
+  </div>
 }
 
 export function ErrorState({ message }: { message: string }) {

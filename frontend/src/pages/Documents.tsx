@@ -44,7 +44,8 @@ export function Documents() {
         <EmptyState title="No documents found" text="Try another filter or upload a mixed-format batch." /> :
         <div className="table-wrap"><table><thead><tr><th>Filename</th><th>Format</th><th>Size</th><th>Uploaded</th><th>Status</th><th>Indexed / extracted</th><th>Actions</th></tr></thead>
           <tbody>{data.items.map(document => <tr key={document.id}>
-            <td><Link to={`/documents/${document.id}`} className="file-cell"><strong>{document.filename}</strong></Link></td>
+            <td><Link to={`/documents/${document.id}`} className="file-cell"><strong>{document.filename}</strong>
+              <small>Version {document.document_version ?? 1} · {document.is_current_version === false || document.is_current_version === 0 ? 'Prior version' : 'Current version'}</small></Link></td>
             <td><span className="format-tag">{document.file_type.toUpperCase()}</span></td><td>{formatBytes(document.file_size)}</td>
             <td>{formatDate(document.uploaded_at)}</td><td><StatusBadge status={document.processing_status} /></td>
             <td>{document.indexed_chunk_count ?? '—'}/{document.chunk_count}</td>

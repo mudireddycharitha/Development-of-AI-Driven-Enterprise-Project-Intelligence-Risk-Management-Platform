@@ -13,9 +13,15 @@ logger = logging.getLogger(__name__)
 
 @router.get("/health")
 def health() -> dict:
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    with connect() as connection:
-        connection.execute("SELECT 1").fetchone()
+    database = "healthy"
+    try:
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        with connect() as connection:
+            connection.execute("SELECT 1").fetchone()
+    except Exception:
+        logger.exception("Database health check failed")
+        database = "unavailable"
+
     try:
         indexed_vectors = count()
         vector_store = "healthy"
@@ -24,11 +30,13 @@ def health() -> dict:
         indexed_vectors = None
         vector_store = "unavailable"
     return {
-        "status": "healthy" if vector_store == "healthy" else "degraded",
-        "database": "healthy",
+        "api_status": "online",
+        "status": "healthy" if database == vector_store == "healthy" else "degraded",
+        "database": database,
         "vector_store": vector_store,
         "indexed_vectors": indexed_vectors,
         "embedding_model": settings.embedding_model,
+        "ai_provider": settings.ai_provider_status(check_connectivity=True),
     }
 
 
