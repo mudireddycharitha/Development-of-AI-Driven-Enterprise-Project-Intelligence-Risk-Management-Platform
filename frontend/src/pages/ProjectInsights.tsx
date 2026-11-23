@@ -6,7 +6,7 @@ import { EmptyState, ErrorState, Loading, PageHeading } from '../components/Shar
 import { apiService, errorMessage } from '../services/api'
 import type { ProjectInsightsResult } from '../types'
 
-const riskLevels = ['Critical', 'High', 'Medium', 'Low'] as const
+const riskLevels = ['Critical', 'High', 'Medium', 'Low', 'Unrated'] as const
 const milestoneStatuses = [
   ['completed', 'Completed', 'milestone-completed'],
   ['in_progress', 'In progress', 'milestone-progress'],
@@ -195,7 +195,7 @@ export function ProjectInsights() {
           <p>Source references and mitigation recommendations are shown when available.</p></div></div>
         {!data.risks.length ? <EmptyState title="No risk findings available" text="Risk information will appear after indexed project documents contain relevant evidence." />
           : <div className="insights-finding-list">{data.risks.map(risk => <article className="risk-card" key={risk.id}>
-            <div className="insights-risk-topline"><span className={`risk-level risk-${risk.level.toLowerCase()}`}>{risk.level}</span>
+            <div className="insights-risk-topline"><span className={`risk-level risk-${risk.level?.toLowerCase() ?? 'unknown'}`}>{risk.level ?? 'Unrated'}</span>
               <span className="insights-category">{risk.category}</span></div>
             <h3>{risk.title}</h3><p>{risk.description}</p>
             <div className="insights-risk-meta"><span>Probability: {risk.probability ?? 'Not stated'}</span><span>Impact: {risk.impact ?? 'Not stated'}</span>

@@ -107,9 +107,9 @@ def project_insights() -> dict[str, Any]:
             if row["processing_status"] == "indexed" and row["is_current_version"]
         ]
         health = calculate_project_health(persist=False)
-        scope = analyze_scope(persist=False)
-        risks = analyze_risks(persist=False)
-        blockers = analyze_blockers(persist=False)
+        scope = analyze_scope(persist=False, use_llm=False)
+        risks = analyze_risks(persist=False, use_llm=False)
+        blockers = analyze_blockers(persist=False, use_llm=False)
         today = datetime.now(timezone.utc).date()
         actions = []
         for item in blockers["action_items"]:
@@ -201,8 +201,8 @@ def project_insights() -> dict[str, Any]:
                 "overdue": sum(item["status"] == "overdue" for item in actions),
             },
             "risk_counts": {
-                level: sum(item["level"] == level for item in risk_items)
-                for level in ("Critical", "High", "Medium", "Low")
+                level: sum((item["level"] or "Unrated") == level for item in risk_items)
+                for level in ("Critical", "High", "Medium", "Low", "Unrated")
             },
             "blocker_counts": {
                 "total": len(blocker_items),

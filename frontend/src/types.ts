@@ -141,8 +141,11 @@ export interface ScopeFinding {
 export interface ScopeAnalysis {
   goals: string[]
   objectives: string[]
+  scope: string[]
   deliverables: string[]
   milestones: ScopeMilestone[]
+  project_start_date?: string | null
+  project_end_date?: string | null
   responsibilities: ScopeResponsibility[]
   dependencies: ScopeDependency[]
   progress: string[]
@@ -155,8 +158,12 @@ export interface ScopeAnalysis {
 export interface RiskFinding {
   id: string
   title: string
-  level: 'Low' | 'Medium' | 'High' | 'Critical'
+  level: 'Low' | 'Medium' | 'High' | 'Critical' | null
   description: string
+  category?: string | null
+  impact?: string | null
+  likelihood?: string | null
+  owner?: string | null
   affected_milestones: string[]
   evidence: EvidenceReference[]
   recommendations: string[]
@@ -166,16 +173,18 @@ export interface RiskFinding {
 
 export interface RiskAnalysis {
   findings: RiskFinding[]
+  severity_counts: Record<'Critical' | 'High' | 'Medium' | 'Low' | 'Unrated', number>
   missing_information: string[]
   source_documents: string[]
   rules_used: string[]
+  notes: string[]
 }
 
 export interface BlockerItem {
   id: string
   description: string
   category: string
-  status: string
+  status: string | null
   assignee?: string | null
   due_date?: string | null
   priority?: string | null
@@ -188,6 +197,7 @@ export interface BlockerItem {
 
 export interface BlockerAnalysis {
   blockers: BlockerItem[]
+  unresolved_issues: BlockerItem[]
   pending_decisions: BlockerItem[]
   action_items: BlockerItem[]
   missing_information: string[]
@@ -334,7 +344,7 @@ export interface ProjectInsightsResult {
   documentation: ProjectInsightsDocumentation
   scope: Pick<ScopeAnalysis, 'goals' | 'objectives' | 'deliverables' | 'milestones' | 'responsibilities' | 'dependencies' | 'progress' | 'missing_information' | 'source_documents'>
   action_counts: { total: number; pending: number; completed: number; overdue: number }
-  risk_counts: Record<'Critical' | 'High' | 'Medium' | 'Low', number>
+  risk_counts: Record<'Critical' | 'High' | 'Medium' | 'Low' | 'Unrated', number>
   blocker_counts: { total: number; unresolved: number; resolved: number; pending_decisions: number }
   milestone_counts: {
     total: number

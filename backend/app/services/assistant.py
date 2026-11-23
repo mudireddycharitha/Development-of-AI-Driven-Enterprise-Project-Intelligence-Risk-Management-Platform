@@ -262,11 +262,18 @@ def retrieve_relevant_chunks(
     if timings is not None:
         timings["query_embedding_ms"] = (perf_counter() - started) * 1000
     started = perf_counter()
-    semantic_matches = query_vectors(
-        vector,
-        min(60, max(24, top_k * 5)),
-        document_ids=document_ids,
-    )
+    try:
+        semantic_matches = query_vectors(
+            vector,
+            min(60, max(24, top_k * 5)),
+            document_ids=document_ids,
+        )
+    except Exception as error:
+        # A stale or externally modified vector collection can have a different
+        # embedding dimension. Keep retrieval grounded through the indexed text
+        # fallback instead of failing the entire agent/chat request.
+        logger.warning("Semantic retrieval unavailable; using lexical retrieval: %s", error)
+        semantic_matches = []
     if timings is not None:
         timings["vector_retrieval_ms"] = (perf_counter() - started) * 1000
     for match in semantic_matches:

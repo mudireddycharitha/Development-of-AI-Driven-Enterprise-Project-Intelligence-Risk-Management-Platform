@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { ArrowDownWideNarrow, ArrowUpRight, Search } from 'lucide-react'
+import { ArrowDownWideNarrow, ArrowUpRight } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { apiService, errorMessage } from '../services/api'
 import type { DocumentRecord, SearchResult } from '../types'
@@ -29,14 +29,14 @@ export function SemanticSearch() {
     <section className="panel search-panel">
       <form onSubmit={event => void submit(event)}>
         <label htmlFor="semantic-query" className="field-label">What would you like to find?</label>
-        <div className="query-box"><Search size={19} /><textarea id="semantic-query" value={query} onChange={event => setQuery(event.target.value)}
+        <div className="query-box"><textarea id="semantic-query" value={query} onChange={event => setQuery(event.target.value)}
           placeholder="For example: What are the major project risks and their mitigation strategies?" rows={3} /></div>
         <div className="search-options"><label><span>Results</span><select value={topK} onChange={event => setTopK(Number(event.target.value))}>{[3, 5, 10, 20, 50].map(value => <option key={value} value={value}>{value} chunks</option>)}</select></label>
           <label><span>Source document</span><select value={documentId} onChange={event => setDocumentId(event.target.value)}><option value="">All documents</option>
             {documents.map(document => <option key={document.id} value={document.id}>{document.filename}</option>)}</select></label>
           <label><span>File type</span><select value={fileType} onChange={event => setFileType(event.target.value)}><option value="">All types</option>
             {formats.map(format => <option key={format} value={format}>{format.toUpperCase()}</option>)}</select></label>
-          <button className="button button-primary" type="submit" disabled={loading}><Search size={16} />{loading ? 'Searching…' : 'Search workspace'}</button>
+          <button className="button button-primary" type="submit" disabled={loading}>{loading ? 'Searching…' : 'Search workspace'}</button>
         </div>
       </form>
     </section>

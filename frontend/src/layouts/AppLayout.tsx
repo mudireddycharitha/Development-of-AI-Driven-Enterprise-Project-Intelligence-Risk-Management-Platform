@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Activity, Blocks, BookOpenText, Boxes, CircleHelp, Files, Gauge, Menu, Search, Settings, ShieldAlert, Target, Upload, Workflow, X, ListChecks, FileOutput, HeartPulse, MessagesSquare, ChartNoAxesCombined } from 'lucide-react'
+import { Activity, Blocks, BookOpenText, Boxes, CircleHelp, Files, Gauge, Menu, Settings, ShieldAlert, Target, Upload, Workflow, X, ListChecks, FileOutput, HeartPulse, MessagesSquare, ChartNoAxesCombined, Search } from 'lucide-react'
 import { apiService } from '../services/api'
 import type { SystemHealth } from '../types'
 
@@ -8,7 +8,7 @@ const navigationGroups = [
   { title: 'WORKSPACE', items: [
     { to: '/', label: 'Overview', icon: Gauge, end: true },
     { to: '/documents', label: 'Documents', icon: Files },
-    { to: '/search', label: 'Semantic search', icon: Search },
+    { to: '/search', label: 'Semantic Search', icon: Search },
     { to: '/upload', label: 'Document upload', icon: Upload },
   ] },
   { title: 'PROJECT INTELLIGENCE', items: [
@@ -78,7 +78,7 @@ export function AppLayout() {
             const activeView = new URLSearchParams(location.search).get('view')
             return `nav-link${isActive && (!targetView || targetView === activeView) ? ' active' : ''}`
           }}>
-            <Icon size={18} strokeWidth={1.8} /><span>{label}</span>
+            {Icon ? <Icon size={18} strokeWidth={1.8} /> : null}<span>{label}</span>
           </NavLink>)}
       </section>)}</nav>
       <div className="sidebar-bottom">
@@ -94,7 +94,6 @@ export function AppLayout() {
       <header className="topbar">
         <button className="mobile-menu" aria-label="Open navigation" onClick={() => setSidebarOpen(true)}><Menu size={19} /></button>
         <div className="breadcrumb"><BookOpenText size={16} /><span>Project Intelligence</span><span>/</span><strong>{currentPage}</strong></div>
-        <NavLink to="/search" className="topbar-search"><Search size={15} /><span>Search workspace</span><kbd>Ctrl K</kbd></NavLink>
         <div className="topbar-statuses" aria-label="System connectivity">
           <NavLink to="/settings" className={`topbar-status ${systemHealth?.api_status === 'online' ? 'healthy' : 'unavailable'}`}
             title={systemHealth ? `API ${systemHealth.status}; database ${systemHealth.database}; vector store ${systemHealth.vector_store}` : 'Backend API unavailable'}

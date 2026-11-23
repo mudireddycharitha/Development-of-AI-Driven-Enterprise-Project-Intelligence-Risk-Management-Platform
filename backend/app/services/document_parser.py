@@ -207,7 +207,7 @@ def _structured_xml(path: Path) -> list[TextSegment]:
     root = ET.fromstring(_decode(path))
     segments: list[TextSegment] = []
 
-    def visit(element: ET.Element, parent: str = "") -> None:
+    def visit(element: Any, parent: str = "") -> None:
         name = element.tag.rsplit("}", 1)[-1]
         location = f"{parent}.{name}" if parent else name
         if element.text and element.text.strip():

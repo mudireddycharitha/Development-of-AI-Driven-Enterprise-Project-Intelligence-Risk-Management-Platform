@@ -217,7 +217,7 @@ def _risk_level(text: str, agent_level: str) -> str:
 
 def _risk_register(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ids = [document["id"] for document in documents]
-    analysis = analyze_risks(document_ids=ids)
+    analysis = analyze_risks(document_ids=ids, use_llm=False)
     result: list[dict[str, Any]] = []
     for finding in analysis["findings"]:
         evidence = finding.get("evidence") or []
@@ -275,7 +275,7 @@ def _risk_register(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _actions_and_decisions(documents: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    analysis = analyze_blockers(document_ids=[document["id"] for document in documents])
+    analysis = analyze_blockers(document_ids=[document["id"] for document in documents], use_llm=False)
     actions: list[dict[str, Any]] = []
     decisions: list[dict[str, Any]] = []
     for item in analysis["action_items"]:

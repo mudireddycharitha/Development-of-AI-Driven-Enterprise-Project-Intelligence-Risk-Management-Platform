@@ -963,7 +963,7 @@ def test_project_insights_dashboard_metrics_match_agents_and_current_documentati
         }
         assert empty_body["documentation"]["is_current"] is False
         assert empty_body["risk_counts"] == {
-            "Critical": 0, "High": 0, "Medium": 0, "Low": 0,
+            "Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Unrated": 0,
         }
         assert empty_body["milestone_counts"]["total"] == 0
 

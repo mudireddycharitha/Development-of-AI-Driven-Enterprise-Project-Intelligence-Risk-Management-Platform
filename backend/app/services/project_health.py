@@ -250,9 +250,9 @@ def calculate_project_health(persist: bool = True) -> dict[str, Any]:
                 )
         return result
 
-    scope = analyze_scope(document_ids=document_ids, persist=False)
-    risks = analyze_risks(document_ids=document_ids, persist=False)
-    blockers = analyze_blockers(document_ids=document_ids, persist=False)
+    scope = analyze_scope(document_ids=document_ids, persist=False, use_llm=False)
+    risks = analyze_risks(document_ids=document_ids, persist=False, use_llm=False)
+    blockers = analyze_blockers(document_ids=document_ids, persist=False, use_llm=False)
     scope_dimension = _scope_dimension(scope, document_text)
     timeline_dimension, delayed = _timeline_dimension(scope, risks)
     blocker_dimension, unresolved, decisions = _blocker_dimension(blockers, document_text)
