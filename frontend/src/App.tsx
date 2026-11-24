@@ -13,11 +13,13 @@ import { DocumentationGeneration } from './pages/DocumentationGeneration'
 import { ProjectHealth } from './pages/ProjectHealth'
 import { ProjectAssistant } from './pages/ProjectAssistant'
 import { ProjectInsights } from './pages/ProjectInsights'
+import { IncrementalUpload } from './pages/IncrementalUpload'
 
 export default function App() {
   return <BrowserRouter><Routes><Route element={<AppLayout />}>
     <Route index element={<Dashboard />} />
     <Route path="upload" element={<UploadDocuments />} />
+    <Route path="incremental-upload" element={<IncrementalUpload />} />
     <Route path="documents" element={<Documents />} />
     <Route path="documents/:documentId" element={<DocumentDetails />} />
     <Route path="chunks" element={<ChunkExplorer />} />

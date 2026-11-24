@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowRight, ArrowUpRight, CheckCircle2, FileText, ListChecks, LoaderCircle, RefreshCcw, ShieldAlert, Sparkles, Target, Upload, X } from 'lucide-react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { apiService, errorMessage } from '../services/api'
-import type { BlockerAnalysis, BlockerItem, DocumentRecord, EvidenceReference, RiskAnalysis, RiskFinding, ScopeAnalysis, ScopeFinding } from '../types'
+import type { BlockerAnalysis, BlockerItem, DocumentRecord, EvidenceReference, MainProjectGoal, RiskAnalysis, RiskFinding, ScopeAnalysis, ScopeFinding, SupportingObjective } from '../types'
 
 const emptyScope: ScopeAnalysis = {
-  goals: [], objectives: [], scope: [], deliverables: [], milestones: [], responsibilities: [], dependencies: [], progress: [], findings: [], missing_information: [], source_documents: [], notes: [],
+  goals: [], objectives: [], main_project_goal: null, supporting_objectives: [], scope: [], deliverables: [], milestones: [], responsibilities: [], dependencies: [], progress: [], findings: [], missing_information: [], source_documents: [], notes: [],
 }
 
 const emptyRisks: RiskAnalysis = { findings: [], severity_counts: { Critical: 0, High: 0, Medium: 0, Low: 0, Unrated: 0 }, missing_information: [], source_documents: [], rules_used: [], notes: [] }
@@ -53,12 +53,47 @@ function EvidenceLinks({ evidence, onOpen }: { evidence: EvidenceReference[]; on
   </div>
 }
 
-function AgentAnalysisSummary({ status, duration, completedAt, documentCount, findingCount, sourceDocuments, notes }: {
+function MainProjectGoalSection({ goal, onOpen }: { goal: MainProjectGoal | null | undefined; onOpen: (evidence: EvidenceReference) => void }) {
+  return <section className="main-goal-section" aria-labelledby="main-project-goal-heading">
+    <div className="main-goal-label">SECTION 1 · MAIN PROJECT GOAL</div>
+    {goal ? <>
+      <h3 id="main-project-goal-heading">{goal.title || 'Main project goal'}</h3>
+      <p className="main-goal-statement">{goal.statement}</p>
+      <div className="main-goal-details">
+        <div><strong>Main problem</strong><p>{goal.problem || 'The uploaded documents do not clearly state the problem being addressed; clarification is needed.'}</p>{goal.problem && <EvidenceLinks evidence={goal.problem_evidence} onOpen={onOpen} />}</div>
+        <div><strong>Expected outcome</strong><p>{goal.expected_outcome || 'The uploaded documents do not clearly state the expected outcome; clarification is needed.'}</p>{goal.expected_outcome && <EvidenceLinks evidence={goal.outcome_evidence} onOpen={onOpen} />}</div>
+      </div>
+      <EvidenceLinks evidence={goal.evidence} onOpen={onOpen} />
+    </> : <>
+      <h3 id="main-project-goal-heading">Main project goal needs clarification</h3>
+      <p className="main-goal-statement">The selected documents do not contain a verifiable overall-goal statement. Add or select a project charter or purpose statement; supporting objectives are not substituted for the main goal.</p>
+    </>}
+  </section>
+}
+
+function SupportingObjectivesSection({ objectives, onOpen }: { objectives: SupportingObjective[]; onOpen: (evidence: EvidenceReference) => void }) {
+  return <section className="analysis-section supporting-objectives-section">
+    <h3>SECTION 2 · SUPPORTING OBJECTIVES</h3>
+    {objectives.length ? <ol className="supporting-objective-grid">{objectives.map((objective, index) => <li className="supporting-objective-card" key={objective.id || `${objective.title}-${index}`}>
+      <span className="objective-number">{index + 1}</span>
+      <div>
+        <h4>{objective.title}</h4>
+        <p>{objective.description}</p>
+        <small>{objective.contribution}</small>
+        {objective.related_deliverable && <p><strong>Related deliverable:</strong> {objective.related_deliverable}</p>}
+        <EvidenceLinks evidence={objective.evidence} onOpen={onOpen} />
+      </div>
+    </li>)}</ol> : <p>No supporting objectives with verifiable source evidence were identified. Clarification is needed.</p>}
+  </section>
+}
+
+function AgentAnalysisSummary({ status, duration, completedAt, documentCount, findingCount, evidenceChunkCount, sourceDocuments, notes }: {
   status: string
   duration?: number
   completedAt?: string
   documentCount: number
   findingCount: number
+  evidenceChunkCount: number
   sourceDocuments: string[]
   notes: string[]
 }) {
@@ -68,6 +103,7 @@ function AgentAnalysisSummary({ status, duration, completedAt, documentCount, fi
       <span>Status<strong>{status === 'succeeded' ? 'Completed' : status === 'running' ? 'Running' : status === 'failed' ? 'Failed' : 'Not started'}</strong></span>
       <span>Documents analyzed<strong>{documentCount}</strong></span>
       <span>Findings<strong>{findingCount}</strong></span>
+      <span>Relevant evidence chunks<strong>{evidenceChunkCount}</strong></span>
       <span>Duration<strong>{duration == null ? '—' : `${(duration / 1000).toFixed(1)} sec`}</strong></span>
       <span>Completed<strong>{completedAt || '—'}</strong></span>
       <span>Source coverage<strong>{sourceDocuments.length} document{sourceDocuments.length === 1 ? '' : 's'}</strong></span>
@@ -113,6 +149,9 @@ export function ProjectIntelligence() {
   const [selectedFinding, setSelectedFinding] = useState<FindingDetail | null>(null)
   const [statusFilter, setStatusFilter] = useState('')
   const [priorityFilter, setPriorityFilter] = useState('')
+  const analysisVersion = useRef(0)
+  const sourceSignature = useRef('')
+  const autoScopeSignature = useRef('')
 
   const clearAgentResults = () => {
     setScope(emptyScope)
@@ -121,6 +160,10 @@ export function ProjectIntelligence() {
     setScopeRunStatus('idle')
     setRiskRunStatus('idle')
     setBlockerRunStatus('idle')
+    setLoading(false)
+    setRunningAll(false)
+    setAgentDurations({})
+    setAgentCompletionTimes({})
   }
 
   const loadDocuments = async () => {
@@ -128,10 +171,20 @@ export function ProjectIntelligence() {
     setError(null)
     try {
       const page = await apiService.documents({ page: 1, page_size: 100 })
-      const items = page.items.filter(item => item.processing_status === 'indexed')
+      const items = page.items.filter(item =>
+        item.processing_status === 'indexed' && item.is_current_version !== false && item.is_current_version !== 0,
+      )
+      const signature = items
+        .map(item => [item.id, item.document_version ?? '', item.updated_at ?? item.last_processed_at ?? item.uploaded_at, item.indexed_chunk_count ?? ''].join(':'))
+        .sort()
+        .join('|')
+      if (signature !== sourceSignature.current) {
+        sourceSignature.current = signature
+        analysisVersion.current += 1
+        clearAgentResults()
+      }
       setDocuments(items)
       setSelectedIds(items.map(item => item.id))
-      clearAgentResults()
     } catch (fetchError) {
       setError(errorMessage(fetchError))
     } finally {
@@ -150,6 +203,24 @@ export function ProjectIntelligence() {
   }, [selectedFinding])
 
   const availableScope = useMemo(() => scope.findings.length > 0 || scope.goals.length > 0 || scope.objectives.length > 0 || scope.scope.length > 0 || scope.deliverables.length > 0 || scope.milestones.length > 0 || scope.responsibilities.length > 0 || scope.dependencies.length > 0, [scope])
+  const supportingObjectives = useMemo(() => {
+    if (scope.supporting_objectives?.length) return scope.supporting_objectives
+    return scope.objectives.flatMap((description, index) => {
+      const finding = scope.findings.find(item =>
+        ['Objective', 'Requirement'].includes(item.category) &&
+        item.description.trim().toLocaleLowerCase() === description.trim().toLocaleLowerCase() &&
+        item.evidence.length > 0,
+      )
+      if (!finding) return []
+      return [{
+        id: finding.id || `objective-${index + 1}`,
+        title: description.split(':', 1)[0].trim(),
+        description,
+        contribution: `Contributes to the main goal by accomplishing this documented objective: ${description}`,
+        evidence: finding.evidence,
+      }]
+    })
+  }, [scope])
   const availableRisks = useMemo(() => risks.findings.length > 0 || risks.missing_information.length > 0, [risks])
   const availableBlockers = useMemo(() => blockers.blockers.length || blockers.unresolved_issues.length || blockers.pending_decisions.length || blockers.action_items.length || blockers.missing_information.length, [blockers])
   const hasBlockerFindings = blockers.blockers.length > 0 || blockers.unresolved_issues.length > 0 || blockers.pending_decisions.length > 0 || blockers.action_items.length > 0
@@ -160,6 +231,7 @@ export function ProjectIntelligence() {
   }
 
   const runScopeAnalysis = async () => {
+    const requestVersion = analysisVersion.current
     setScope(emptyScope)
     const startedAt = performance.now()
     setLoading(true)
@@ -167,21 +239,24 @@ export function ProjectIntelligence() {
     setError(null)
     try {
       const result = await apiService.scopeAnalysis(selectedIds.length ? selectedIds : undefined)
+      if (requestVersion !== analysisVersion.current) return
       setScope(result)
       setScopeRunStatus('succeeded')
       recordAgentDuration('scope', startedAt)
       logAgentTiming('Scope agent', startedAt, 'completed')
     } catch (fetchError) {
+      if (requestVersion !== analysisVersion.current) return
       setScopeRunStatus('failed')
       recordAgentDuration('scope', startedAt)
       setError(agentFailureMessage(fetchError))
       logAgentTiming('Scope agent', startedAt, 'failed')
     } finally {
-      setLoading(false)
+      if (requestVersion === analysisVersion.current) setLoading(false)
     }
   }
 
   const runRiskAnalysis = async () => {
+    const requestVersion = analysisVersion.current
     setRisks(emptyRisks)
     const startedAt = performance.now()
     setLoading(true)
@@ -189,21 +264,24 @@ export function ProjectIntelligence() {
     setError(null)
     try {
       const result = await apiService.riskAnalysis(selectedIds.length ? selectedIds : undefined)
+      if (requestVersion !== analysisVersion.current) return
       setRisks(result)
       setRiskRunStatus('succeeded')
       recordAgentDuration('risks', startedAt)
       logAgentTiming('Risk agent', startedAt, 'completed')
     } catch (fetchError) {
+      if (requestVersion !== analysisVersion.current) return
       setRiskRunStatus('failed')
       recordAgentDuration('risks', startedAt)
       setError(agentFailureMessage(fetchError))
       logAgentTiming('Risk agent', startedAt, 'failed')
     } finally {
-      setLoading(false)
+      if (requestVersion === analysisVersion.current) setLoading(false)
     }
   }
 
   const runBlockerAnalysis = async () => {
+    const requestVersion = analysisVersion.current
     const startedAt = performance.now()
     setLoading(true)
     setError(null)
@@ -211,17 +289,19 @@ export function ProjectIntelligence() {
     setBlockers(emptyBlockers)
     try {
       const result = await apiService.blockerAnalysis(selectedIds.length ? selectedIds : undefined)
+      if (requestVersion !== analysisVersion.current) return
       setBlockers(result)
       setBlockerRunStatus('succeeded')
       recordAgentDuration('blockers', startedAt)
       logAgentTiming('Blocker agent', startedAt, 'completed')
     } catch (fetchError) {
+      if (requestVersion !== analysisVersion.current) return
       setBlockerRunStatus('failed')
       recordAgentDuration('blockers', startedAt)
       setError(agentFailureMessage(fetchError))
       logAgentTiming('Blocker agent', startedAt, 'failed')
     } finally {
-      setLoading(false)
+      if (requestVersion === analysisVersion.current) setLoading(false)
     }
   }
 
@@ -230,6 +310,7 @@ export function ProjectIntelligence() {
       setError('Select at least one indexed document before running the agents.')
       return
     }
+    const requestVersion = analysisVersion.current
     setRunningAll(true)
     setLoading(true)
     const runStartedAt = performance.now()
@@ -245,33 +326,39 @@ export function ProjectIntelligence() {
     try {
       await Promise.all([
         apiService.scopeAnalysis(selectedIds).then(result => {
+          if (requestVersion !== analysisVersion.current) return
           setScope(result)
           setScopeRunStatus('succeeded')
           recordAgentDuration('scope', scopeStartedAt)
           logAgentTiming('Scope agent', scopeStartedAt, 'completed')
         }).catch(requestError => {
+          if (requestVersion !== analysisVersion.current) return
           setScopeRunStatus('failed')
           recordAgentDuration('scope', scopeStartedAt)
           failures.push(`Scope agent failed: ${agentFailureMessage(requestError)}`)
           logAgentTiming('Scope agent', scopeStartedAt, 'failed')
         }),
         apiService.riskAnalysis(selectedIds).then(result => {
+          if (requestVersion !== analysisVersion.current) return
           setRisks(result)
           setRiskRunStatus('succeeded')
           recordAgentDuration('risks', riskStartedAt)
           logAgentTiming('Risk agent', riskStartedAt, 'completed')
         }).catch(requestError => {
+          if (requestVersion !== analysisVersion.current) return
           setRiskRunStatus('failed')
           recordAgentDuration('risks', riskStartedAt)
           failures.push(`Risk agent failed: ${agentFailureMessage(requestError)}`)
           logAgentTiming('Risk agent', riskStartedAt, 'failed')
         }),
         apiService.blockerAnalysis(selectedIds).then(result => {
+          if (requestVersion !== analysisVersion.current) return
           setBlockers(result)
           setBlockerRunStatus('succeeded')
           recordAgentDuration('blockers', blockerStartedAt)
           logAgentTiming('Blocker agent', blockerStartedAt, 'completed')
         }).catch(requestError => {
+          if (requestVersion !== analysisVersion.current) return
           setBlockerRunStatus('failed')
           recordAgentDuration('blockers', blockerStartedAt)
           failures.push(`Blocker agent failed: ${agentFailureMessage(requestError)}`)
@@ -280,13 +367,26 @@ export function ProjectIntelligence() {
       ])
       if (failures.length) setError(failures.join(' '))
     } finally {
-      console.info(`[Project Intelligence] Run All completed in ${(performance.now() - runStartedAt).toFixed(0)} ms`)
-      setLoading(false)
-      setRunningAll(false)
+      if (requestVersion === analysisVersion.current) {
+        console.info(`[Project Intelligence] Run All completed in ${(performance.now() - runStartedAt).toFixed(0)} ms`)
+        setLoading(false)
+        setRunningAll(false)
+      }
     }
   }
 
+  useEffect(() => {
+    const signature = documents
+      .map(item => [item.id, item.document_version ?? '', item.updated_at ?? item.last_processed_at ?? item.uploaded_at, item.indexed_chunk_count ?? ''].join(':'))
+      .sort()
+      .join('|')
+    if (!signature || signature === autoScopeSignature.current) return
+    autoScopeSignature.current = signature
+    void runScopeAnalysis()
+  }, [documents])
+
   const toggleDocument = (id: string) => {
+    analysisVersion.current += 1
     clearAgentResults()
     setError(null)
     setSelectedIds(previous => previous.includes(id) ? previous.filter(item => item !== id) : [...previous, id])
@@ -347,7 +447,7 @@ export function ProjectIntelligence() {
     const visibleItems = filteredItems(items)
     if (!visibleItems.length) return null
     return <section className="analysis-section" key={title}><h3>{title}</h3><div className="finding-list">{visibleItems.map(item => <article className="blocker-finding-card" key={item.id}>
-      <button className="blocker-finding-main" onClick={() => openBlockerFinding(category, item)}><strong>{item.description}</strong><span>Owner: {item.assignee || 'Not specified in uploaded documents'}</span><span>Due date: {item.due_date || 'Not specified in uploaded documents'}</span><span>Status: {item.status || 'Not specified in uploaded documents'}</span><span>Priority: {item.priority || 'Not specified in uploaded documents'}</span>{item.recommendation && <span>Next step: {item.recommendation}</span>}</button>
+      <button className="blocker-finding-main" onClick={() => openBlockerFinding(category, item)}><strong>{item.description}</strong><span>Owner: {item.assignee || 'Not specified in uploaded documents'}</span><span>Due date: {item.due_date || 'Not specified in uploaded documents'}</span><span>Status: {item.status || 'Not specified in uploaded documents'}</span><span>Priority: {item.priority || 'Not specified in uploaded documents'}</span>{item.related_project_goal && <span>Related main goal: {item.related_project_goal}</span>}{item.affected_objectives?.length ? <span>Related objectives: {item.affected_objectives.join(', ')}</span> : null}{item.recommendation && <span>Next step: {item.recommendation}</span>}</button>
       <EvidenceLinks evidence={item.evidence} onOpen={openSource} />
     </article>)}</div></section>
   }
@@ -367,6 +467,15 @@ export function ProjectIntelligence() {
     </div>
 
     {error && <div className="alert-box error-box">{error}</div>}
+
+    {(activeView === 'all' || activeView === 'scope') && <section className="scope-overview">
+      {scopeRunStatus === 'running' && !availableScope && <div className="scope-overview-loading"><LoaderCircle size={16} className="spin" /> Preparing the evidence-backed project goal and supporting objectives…</div>}
+      {scopeRunStatus === 'succeeded' && !availableScope && <MainProjectGoalSection goal={null} onOpen={openSource} />}
+      {availableScope && <>
+        <MainProjectGoalSection goal={scope.main_project_goal} onOpen={openSource} />
+        <SupportingObjectivesSection objectives={supportingObjectives} onOpen={openSource} />
+      </>}
+    </section>}
 
     <div className="panel">
       <div className="panel-heading">
@@ -403,7 +512,7 @@ export function ProjectIntelligence() {
       }}>{label}</button>)}
     </nav>
 
-    <div className={`agent-grid${activeView === 'all' ? '' : ' single-agent-grid'}`}>
+    <div className={`agent-grid${activeView === 'all' ? ' ordered-agent-grid' : ' single-agent-grid'}`}>
       {(activeView === 'all' || activeView === 'scope') && <div className="panel agent-panel">
         <div className="panel-heading">
           <div>
@@ -414,17 +523,59 @@ export function ProjectIntelligence() {
             {scopeRunStatus === 'running' ? <><LoaderCircle size={13} className="spin" /> Processing</> : 'Run Agent'}
           </button>
         </div>
-        {!availableScope ? <div className="empty-state">No scope analysis has been produced yet.</div> : <div className="analysis-stack">
-          <PopulatedResultList title="Project Goals" items={scope.goals} />
-          <PopulatedResultList title="Objectives" items={scope.objectives} />
-          <PopulatedResultList title="Project Scope" items={scope.scope} />
-          <PopulatedResultList title="Milestones and Timeline" items={scope.milestones.map(item => item.description || item.name || item.date || null)} />
-          <PopulatedResultList title="Project Deliverables" items={scope.deliverables} />
-          <PopulatedResultList title="Team Responsibilities" items={scope.responsibilities.map(item => [item.task || null, item.owner ? `Owner: ${item.owner}` : null, item.status ? `Status: ${item.status}` : null].filter(Boolean).join(' · '))} />
-          <PopulatedResultList title="Dependencies" items={scope.dependencies.map(item => item.description ?? null)} />
-          <div className="analysis-section"><h3>Supporting Evidence and Source Documents</h3>{scope.findings.length ? <div className="source-finding-list">{scope.findings.map(item => <article className="source-finding" key={item.id}><button className="source-finding-heading" onClick={() => openScopeFinding(item)}><strong>{item.title}</strong><span>{item.description}</span></button><EvidenceLinks evidence={item.evidence} onOpen={openSource} /></article>)}</div> : <p>Source references are not available for the returned findings.</p>}</div>
+        {!availableScope ? <div className="empty-state">{scopeRunStatus === 'running'
+          ? 'Analyzing project purpose and supporting objectives from the selected documents…'
+          : scopeRunStatus === 'failed'
+            ? 'Scope analysis did not complete. Review the error above and retry.'
+            : scopeRunStatus === 'succeeded'
+              ? 'The scope agent completed but found no verifiable scope records.'
+              : 'No scope analysis has been produced yet.'}</div> : <div className="analysis-stack">
+          <section className="analysis-section scope-deliverables-section">
+            <h3>SECTION 3 · PROJECT DELIVERABLES</h3>
+            {scope.deliverables.length ? <div className="scope-deliverable-grid">{scope.deliverables.map((deliverable, index) => {
+              const label = deliverable.split(';', 1)[0].trim().toLocaleLowerCase()
+              const finding = scope.findings.find(item =>
+                item.category === 'Deliverable' &&
+                [item.related_deliverable, item.title, item.description].some(value => value?.toLocaleLowerCase().includes(label)),
+              )
+              return <article className="scope-deliverable-card" key={`${deliverable}-${index}`}>
+                <strong>{deliverable}</strong>
+                <EvidenceLinks evidence={finding?.evidence ?? []} onOpen={openSource} />
+              </article>
+            })}</div> : <p>No expected deliverables were identified in the selected documents.</p>}
+          </section>
+          <section className="analysis-section scope-timeline-section">
+            <h3>SECTION 4 · PROJECT MILESTONES AND TIMELINE</h3>
+            {(scope.project_start_date || scope.project_end_date) && <p className="scope-timeline-range">Project timeline: {scope.project_start_date || 'Start date not stated'} → {scope.project_end_date || 'End date not stated'}</p>}
+            {scope.milestones.length ? <div className="scope-milestone-list">{scope.milestones.map((milestone, index) => <article className="scope-milestone-card" key={`${milestone.name ?? milestone.description ?? 'milestone'}-${milestone.date ?? index}`}>
+              <div><strong>{milestone.name || milestone.description || 'Project milestone'}</strong><span>Target date: {milestone.date || 'Not stated in documents'}</span></div>
+              <div><span>Status: {milestone.status || 'Not stated'}</span>{milestone.owner && <span>Responsible: {milestone.owner}</span>}</div>
+              <EvidenceLinks evidence={milestone.evidence} onOpen={openSource} />
+            </article>)}</div> : <p>No milestones or target dates were identified in the selected documents.</p>}
+          </section>
+          <section className="analysis-section scope-responsibility-section">
+            <h3>SECTION 5 · SCOPE AND RESPONSIBILITIES</h3>
+            <div className="scope-boundary-grid">
+              <div><strong>Included scope</strong>{scope.scope.filter(item => !/\b(?:out of scope|excluded|not included)\b/i.test(item)).length
+                ? <ul>{scope.scope.filter(item => !/\b(?:out of scope|excluded|not included)\b/i.test(item)).map((item, index) => <li key={`scope-in-${index}`}>{item}</li>)}</ul>
+                : <p>Included scope is not stated in the selected documents.</p>}</div>
+              <div><strong>Documented exclusions</strong>{scope.scope.filter(item => /\b(?:out of scope|excluded|not included)\b/i.test(item)).length
+                ? <ul>{scope.scope.filter(item => /\b(?:out of scope|excluded|not included)\b/i.test(item)).map((item, index) => <li key={`scope-out-${index}`}>{item}</li>)}</ul>
+                : <p>No explicit exclusions were found.</p>}</div>
+            </div>
+            {scope.responsibilities.length ? <div className="scope-responsibility-list">{scope.responsibilities.map((responsibility, index) => <article className="scope-responsibility-card" key={`${responsibility.task ?? 'responsibility'}-${responsibility.owner ?? index}`}>
+              <strong>{responsibility.task || 'Project responsibility'}</strong>
+              <span>Responsible: {responsibility.owner || 'Not specified'}</span>
+              {responsibility.role && <span>Role: {responsibility.role}</span>}
+              {responsibility.status && <span>Status: {responsibility.status}</span>}
+              <EvidenceLinks evidence={responsibility.evidence} onOpen={openSource} />
+            </article>)}</div> : <p>Responsibilities are not stated in the selected documents.</p>}
+            {scope.dependencies.length > 0 && <div className="scope-dependencies"><strong>Dependencies</strong><ul>{scope.dependencies.map((dependency, index) => <li key={`dependency-${index}`}>{dependency.description || `${dependency.from_task || 'Task'} depends on ${dependency.to_task || 'an unspecified input'}`}<EvidenceLinks evidence={dependency.evidence} onOpen={openSource} /></li>)}</ul></div>}
+          </section>
+          {scope.findings.length > 0 && <div className="analysis-section"><h3>Additional source findings</h3><div className="source-finding-list">{scope.findings.map(item => <article className="source-finding" key={item.id}><button className="source-finding-heading" onClick={() => openScopeFinding(item)}><strong>{item.title}</strong><span>{item.description}</span></button><EvidenceLinks evidence={item.evidence} onOpen={openSource} /></article>)}</div></div>}
+          {scope.missing_information.length > 0 && <div className="analysis-section scope-missing-information"><h3>Clarifications needed</h3><ul>{scope.missing_information.map((item, index) => <li key={`scope-missing-${index}`}>{item}</li>)}</ul></div>}
         </div>}
-        {scopeRunStatus !== 'idle' && <AgentAnalysisSummary status={scopeRunStatus} duration={agentDurations.scope} completedAt={agentCompletionTimes.scope} documentCount={selectedIds.length} findingCount={scope.findings.length} sourceDocuments={scope.source_documents} notes={scope.notes} />}
+        {scopeRunStatus !== 'idle' && <AgentAnalysisSummary status={scopeRunStatus} duration={agentDurations.scope} completedAt={agentCompletionTimes.scope} documentCount={selectedIds.length} findingCount={scope.findings.length} evidenceChunkCount={scope.processing?.evidence_chunks_retrieved ?? 0} sourceDocuments={scope.source_documents} notes={scope.notes} />}
       </div>}
 
       {(activeView === 'all' || activeView === 'risks') && <div className="panel agent-panel">
@@ -444,7 +595,7 @@ export function ProjectIntelligence() {
             {(risks.severity_counts.Unrated ?? 0) > 0 && <p className="unrated-summary">Unrated: <strong>{risks.severity_counts.Unrated}</strong> risk{risks.severity_counts.Unrated === 1 ? '' : 's'} have insufficient documented impact or likelihood for classification.</p>}
           </section>
           {risks.findings.length ? <div className="analysis-section"><h3>Risk Findings</h3><div className="risk-finding-list">{risks.findings.map(item => <article className="risk-finding-card" key={item.id}>
-            <button className="risk-finding-main" onClick={() => openRiskFinding(item)}><span className="finding-row-heading"><strong>{item.title}</strong><span className={`risk-level risk-${item.level?.toLowerCase() ?? 'unknown'}`}>{item.level ?? 'Unrated'}</span></span>{item.category && <small>Category: {item.category}</small>}<span>{item.description}</span><div className="risk-finding-facts"><span>Impact: {item.impact || 'Not specified in uploaded documents'}</span><span>Likelihood: {item.likelihood || 'Not specified in uploaded documents'}</span>{item.owner && <span>Owner: {item.owner}</span>}{item.affected_milestones.length > 0 && <span>Related milestones: {item.affected_milestones.join(', ')}</span>}</div>{item.recommendations.length > 0 && <small>Mitigation: {item.recommendations.join(' · ')}</small>}</button><EvidenceLinks evidence={item.evidence} onOpen={openSource} />
+            <button className="risk-finding-main" onClick={() => openRiskFinding(item)}><span className="finding-row-heading"><strong>{item.title}</strong><span className={`risk-level risk-${item.level?.toLowerCase() ?? 'unknown'}`}>{item.level ?? 'Unrated'}</span></span>{item.category && <small>Category: {item.category}</small>}<span>{item.description}</span><div className="risk-finding-facts"><span>Impact: {item.impact || 'Not specified in uploaded documents'}</span><span>Likelihood: {item.likelihood || 'Not specified in uploaded documents'}</span>{item.owner && <span>Owner: {item.owner}</span>}{item.affected_milestones.length > 0 && <span>Related milestones: {item.affected_milestones.join(', ')}</span>}{item.related_project_goal && <span>Related main goal: {item.related_project_goal}</span>}{item.affected_objectives?.length ? <span>Related objectives: {item.affected_objectives.join(', ')}</span> : null}</div>{item.recommendations.length > 0 && <small>Mitigation: {item.recommendations.join(' · ')}</small>}</button><EvidenceLinks evidence={item.evidence} onOpen={openSource} />
           </article>)}</div></div> : <div className="empty-state">No specific risks were identified in the selected documents.</div>}
           {['Dependency gap', 'Schedule or delivery risk'].map(category => {
             const items = risks.findings.filter(item => item.category === category)
@@ -455,7 +606,7 @@ export function ProjectIntelligence() {
           <PopulatedResultList title="Recommended Mitigation Actions" items={risks.findings.flatMap(item => item.recommendations)} />
           {risks.missing_information.length > 0 && <div className="analysis-section"><h3>Additional information needed</h3><ul>{risks.missing_information.map((item, index) => <li key={`risk-missing-${index}`}>{item}</li>)}</ul></div>}
         </div>
-        {riskRunStatus !== 'idle' && <AgentAnalysisSummary status={riskRunStatus} duration={agentDurations.risks} completedAt={agentCompletionTimes.risks} documentCount={selectedIds.length} findingCount={risks.findings.length} sourceDocuments={risks.source_documents} notes={risks.notes} />}
+        {riskRunStatus !== 'idle' && <AgentAnalysisSummary status={riskRunStatus} duration={agentDurations.risks} completedAt={agentCompletionTimes.risks} documentCount={selectedIds.length} findingCount={risks.findings.length} evidenceChunkCount={risks.processing?.evidence_chunks_retrieved ?? 0} sourceDocuments={risks.source_documents} notes={risks.notes} />}
       </div>}
 
       {(activeView === 'all' || activeView === 'blockers') && <div className="panel agent-panel">
@@ -485,7 +636,7 @@ export function ProjectIntelligence() {
           </>}
           {blockers.missing_information.length > 0 && <div className="analysis-section"><h3>Missing information</h3><ul>{blockers.missing_information.map((item, index) => <li key={`blocker-missing-${index}`}>{item}</li>)}</ul></div>}
         </div>}
-        {blockerRunStatus !== 'idle' && <AgentAnalysisSummary status={blockerRunStatus} duration={agentDurations.blockers} completedAt={agentCompletionTimes.blockers} documentCount={selectedIds.length} findingCount={blockers.blockers.length + blockers.unresolved_issues.length + blockers.pending_decisions.length + blockers.action_items.length} sourceDocuments={blockers.source_documents} notes={blockers.notes} />}
+        {blockerRunStatus !== 'idle' && <AgentAnalysisSummary status={blockerRunStatus} duration={agentDurations.blockers} completedAt={agentCompletionTimes.blockers} documentCount={selectedIds.length} findingCount={blockers.blockers.length + blockers.unresolved_issues.length + blockers.pending_decisions.length + blockers.action_items.length} evidenceChunkCount={blockers.processing?.evidence_chunks_retrieved ?? 0} sourceDocuments={blockers.source_documents} notes={blockers.notes} />}
       </div>}
     </div>
 

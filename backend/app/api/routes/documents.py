@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from starlette.concurrency import run_in_threadpool
 
 from app.core.config import settings
@@ -27,6 +27,36 @@ def _file_type(filename: str) -> str:
 
 @router.post("/upload")
 async def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    return await _upload_documents(files)
+
+
+@router.post("/incremental/upload")
+async def upload_incremental_documents(
+    files: list[UploadFile] = File(...),
+    category: str = Form("General Project Document"),
+    title: str | None = Form(default=None),
+    description: str | None = Form(default=None),
+    project_name: str | None = Form(default=None),
+    milestone_name: str | None = Form(default=None),
+) -> dict[str, Any]:
+    return await _upload_documents(
+        files,
+        category=category,
+        title=title,
+        description=description,
+        project_name=project_name,
+        milestone_name=milestone_name,
+    )
+
+
+async def _upload_documents(
+    files: list[UploadFile],
+    category: str = "General Project Document",
+    title: str | None = None,
+    description: str | None = None,
+    project_name: str | None = None,
+    milestone_name: str | None = None,
+) -> dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="Select at least one file.")
     if len(files) > settings.max_batch_files:
@@ -78,6 +108,11 @@ async def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, Any
                 ).fetchone())
             if existing:
                 destination.unlink(missing_ok=True)
+                with connect() as connection:
+                    connection.execute(
+                        "UPDATE documents SET change_type = 'unchanged', updated_at = ? WHERE id = ?",
+                        (utc_now(), existing["id"]),
+                    )
                 results.append({
                     "document_id": existing["id"],
                     "filename": original_name,
@@ -109,11 +144,16 @@ async def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, Any
                         """INSERT INTO documents
                            (id, filename, stored_filename, file_type, file_size, sha256,
                            uploaded_at, created_at, updated_at, processing_status,
-                           version_of_document_id, document_version, is_current_version)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?, 0)""",
+                           version_of_document_id, document_version, is_current_version,
+                           document_category, document_title, document_description,
+                           project_name, milestone_name, change_type)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?, 0,
+                           ?, ?, ?, ?, ?, ?)""",
                         (document_id, original_name, stored_name, _file_type(original_name),
                          file_size, file_digest, now, now, now,
-                         previous_version["id"] if previous_version else None, version),
+                         previous_version["id"] if previous_version else None, version,
+                         category, title, description, project_name, milestone_name,
+                         "updated" if previous_version else "new"),
                     )
             except sqlite3.IntegrityError:
                 with connect() as connection:
@@ -126,6 +166,11 @@ async def upload_documents(files: list[UploadFile] = File(...)) -> dict[str, Any
                 if existing is None:
                     raise
                 destination.unlink(missing_ok=True)
+                with connect() as connection:
+                    connection.execute(
+                        "UPDATE documents SET change_type = 'unchanged', updated_at = ? WHERE id = ?",
+                        (utc_now(), existing["id"]),
+                    )
                 results.append({
                     "document_id": existing["id"], "filename": original_name,
                     "status": existing["processing_status"], "chunk_count": existing["chunk_count"],
@@ -215,7 +260,9 @@ def list_documents(
         rows = connection.execute(
             f"""SELECT id, filename, file_type, file_size, uploaded_at, created_at, updated_at,
                        processing_status, extraction_error, failed_stage, version_of_document_id,
-                       document_version, is_current_version,
+                       document_version, is_current_version, document_category, document_title,
+                       document_description, project_name, milestone_name, change_type,
+                       last_processed_at,
                        (SELECT COUNT(*) FROM chunks c WHERE c.document_id = documents.id) AS chunk_count
                 FROM documents {where} ORDER BY uploaded_at DESC LIMIT ? OFFSET ?""",
             [*values, page_size, (page - 1) * page_size],

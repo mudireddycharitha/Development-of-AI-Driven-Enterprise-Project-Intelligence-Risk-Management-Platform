@@ -200,6 +200,7 @@ export function ProjectInsights() {
             <h3>{risk.title}</h3><p>{risk.description}</p>
             <div className="insights-risk-meta"><span>Probability: {risk.probability ?? 'Not stated'}</span><span>Impact: {risk.impact ?? 'Not stated'}</span>
               {risk.source_document && <span>Source: {risk.source_document}</span>}</div>
+            {risk.severity_reason && <p className="insights-mitigation"><strong>Severity rationale:</strong> {risk.severity_reason}</p>}
             {risk.mitigation && <p className="insights-mitigation"><strong>Suggested mitigation:</strong> {risk.mitigation}</p>}
             {risk.evidence[0] && <EvidenceReferenceCard evidence={risk.evidence[0]} />}
           </article>)}</div>}

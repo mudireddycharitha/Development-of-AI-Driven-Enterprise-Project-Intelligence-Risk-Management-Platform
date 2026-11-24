@@ -124,9 +124,9 @@ def project_insights() -> dict[str, Any]:
             {
                 **item,
                 "category": _risk_category(item),
-                "probability": None,
-                "impact": None,
-                "mitigation": (item.get("recommendations") or [None])[0],
+                "probability": item.get("likelihood"),
+                "impact": item.get("impact"),
+                "mitigation": item.get("recommended_mitigation") or (item.get("recommendations") or [None])[0],
                 "source_document": (
                     (item.get("evidence") or [{}])[0].get("filename")
                     or ((item.get("evidence") or [{}])[0].get("source"))

@@ -19,6 +19,13 @@ def initialize_database() -> None:
                 file_size INTEGER NOT NULL,
                 sha256 TEXT NOT NULL,
                 uploaded_at TEXT NOT NULL,
+                document_category TEXT NOT NULL DEFAULT 'General Project Document',
+                document_title TEXT,
+                document_description TEXT,
+                project_name TEXT,
+                milestone_name TEXT,
+                change_type TEXT NOT NULL DEFAULT 'new',
+                last_processed_at TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 processing_status TEXT NOT NULL,
@@ -96,6 +103,20 @@ def initialize_database() -> None:
             connection.execute(
                 "ALTER TABLE documents ADD COLUMN is_current_version INTEGER NOT NULL DEFAULT 1"
             )
+        incremental_columns = {
+            "document_category": "TEXT NOT NULL DEFAULT 'General Project Document'",
+            "document_title": "TEXT",
+            "document_description": "TEXT",
+            "project_name": "TEXT",
+            "milestone_name": "TEXT",
+            "change_type": "TEXT NOT NULL DEFAULT 'new'",
+            "last_processed_at": "TEXT",
+        }
+        for column, definition in incremental_columns.items():
+            if column not in document_columns:
+                connection.execute(
+                    f"ALTER TABLE documents ADD COLUMN {column} {definition}"
+                )
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_documents_current_version ON documents(is_current_version, processing_status)"
         )

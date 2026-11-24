@@ -4,9 +4,10 @@ import re
 import threading
 import uuid
 from collections import OrderedDict
+from concurrent.futures import Future
 from functools import lru_cache
 from datetime import datetime, timezone
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any
 from urllib.parse import urlparse
 
@@ -18,19 +19,26 @@ from app.schemas.analysis import (
     BlockerAnalysis,
     BlockerItem,
     EvidenceReference,
+    MainProjectGoal,
     RiskAnalysis,
     RiskFinding,
+    normalize_risk_level,
     ScopeAnalysis,
     ScopeDependency,
     ScopeFinding,
     ScopeMilestone,
     ScopeResponsibility,
+    SupportingObjective,
 )
 
 logger = logging.getLogger(__name__)
 _AGENT_CONTEXT_CACHE: OrderedDict[tuple[Any, ...], str] = OrderedDict()
 _AGENT_CONTEXT_CACHE_LOCK = threading.RLock()
 _AGENT_CONTEXT_CACHE_LIMIT = 24
+_STRUCTURED_AGENT_CACHE: OrderedDict[tuple[Any, ...], str] = OrderedDict()
+_STRUCTURED_AGENT_CACHE_LOCK = threading.RLock()
+_STRUCTURED_AGENT_CACHE_LIMIT = 48
+_STRUCTURED_AGENT_IN_FLIGHT: dict[tuple[Any, ...], Future[dict[str, Any]]] = {}
 
 
 def _utc_now() -> str:
@@ -39,6 +47,16 @@ def _utc_now() -> str:
 
 def _normalize_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", (value or "")).strip()
+
+
+def _document_version_key(documents: list[dict[str, Any]]) -> tuple[tuple[str, ...], ...]:
+    return tuple(sorted((
+        str(document.get("id") or ""),
+        str(document.get("sha256") or ""),
+        str(document.get("updated_at") or ""),
+        str(document.get("document_version") or ""),
+        str(document.get("indexed_chunk_count") or ""),
+    ) for document in documents))
 
 
 def _sentence_split(text: str) -> list[str]:
@@ -55,7 +73,8 @@ def _is_structural_heading(text: str) -> bool:
         r"scope and deliverables$|problem and objective$|actions and next steps$|"
         r"risks, blocker, and decision$|open issues$|risk register$|action items$|"
         r"dependencies$|milestones$|requirements$|project scope$|scope$|goal$|known blocker$|"
-        r"project goals?$|team responsibilities$|owner:|status:|impact$|likelihood$|"
+        r"project goals?$|project objectives?$|success criteria$|objective$|problem statement$|expected outcome$|project outcome$|"
+        r"team responsibilities$|owner:|status:|impact$|likelihood$|"
         r"mitigation$|due date$|source:|page \d+$|slide \d+$)",
         normalized,
     ))
@@ -130,7 +149,7 @@ def _structured_deliverable_milestones(
         fields = {
             key.casefold(): value.strip()
             for key, value in re.findall(
-                r"(?im)^\s*(Deliverable|Due date|Status):\s*(.*?)\s*$",
+                r"(?im)^\s*(Deliverable|Due date|Status|Owner):\s*(.*?)\s*$",
                 block,
             )
         }
@@ -146,6 +165,7 @@ def _structured_deliverable_milestones(
             date=due_dates[0],
             status=status,
             description=description,
+            owner=fields.get("owner"),
             source=document.get("filename"),
             evidence=[reference] if reference.excerpt else [],
         ))
@@ -345,11 +365,7 @@ def _agent_context(documents: list[dict[str, Any]], agent: str) -> str:
     query = retrieval_queries.get(agent)
     if not query or not documents:
         return ""
-    versions = tuple(sorted((
-        str(document.get("id")),
-        str(document.get("updated_at") or ""),
-        int(document.get("indexed_chunk_count") or 0),
-    ) for document in documents))
+    versions = _document_version_key(documents)
     cache_key: tuple[Any, ...] = (agent, versions)
     with _AGENT_CONTEXT_CACHE_LOCK:
         cached = _AGENT_CONTEXT_CACHE.get(cache_key)
@@ -435,25 +451,59 @@ def _run_structured_agent(
     """Run an evidence-grounded extraction; None means rules-only mode is configured."""
     if settings.ai_provider == "rule_based":
         return None
-    prompt = f"""You are the {agent}. Extract only facts explicitly supported by the supplied passages.
+    cache_key = (agent, _document_version_key(documents), response_shape)
+    with _STRUCTURED_AGENT_CACHE_LOCK:
+        cached = _STRUCTURED_AGENT_CACHE.get(cache_key)
+        if cached is not None:
+            _STRUCTURED_AGENT_CACHE.move_to_end(cache_key)
+            logger.info("Structured agent cache hit agent=%s documents=%d", agent, len(documents))
+            return json.loads(cached)
+        future = _STRUCTURED_AGENT_IN_FLIGHT.get(cache_key)
+        is_owner = future is None
+        if future is None:
+            future = Future()
+            _STRUCTURED_AGENT_IN_FLIGHT[cache_key] = future
+    if not is_owner:
+        logger.info("Structured agent request joined in-flight generation agent=%s", agent)
+        return json.loads(json.dumps(future.result(), ensure_ascii=False))
+
+    try:
+        prompt = f"""You are the {agent}. Extract only facts explicitly supported by the supplied passages.
 Return compact valid JSON matching this shape:
 {response_shape}
 
 Every item needs the exact source filename and a verbatim quote of at most 18 words.
 Ignore testing guides, headings, worksheet labels, and generic document descriptions.
-Do not invent or infer facts. Preserve a field only when the quote supports it.
-Return at most one concise item per array. No Markdown or commentary."""
-    context = _agent_context(documents, agent)
-    if not context:
-        raise LLMGenerationError(f"{agent} found no relevant indexed passages for structured extraction.")
-    raw = maybe_call_llm(prompt, context, structured=True)
-    try:
-        parsed = json.loads(raw)
-    except (TypeError, json.JSONDecodeError) as error:
-        raise LLMGenerationError(f"{agent} returned malformed JSON; no analysis was saved.") from error
-    if not isinstance(parsed, dict):
-        raise LLMGenerationError(f"{agent} returned an invalid structured response.")
-    return parsed
+Do not invent facts. Preserve a field only when the quote supports it.
+Return the one main goal and up to 8 distinct supporting objectives when requested.
+For other arrays, return up to 4 distinct evidence-backed items. Set project-goal or objective relationships
+only when the exact related text appears in that finding's quoted source; otherwise leave them null or empty.
+No Markdown or commentary."""
+        context = _agent_context(documents, agent)
+        if not context:
+            raise LLMGenerationError(f"{agent} found no relevant indexed passages for structured extraction.")
+        raw = maybe_call_llm(prompt, context, structured=True)
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise LLMGenerationError(f"{agent} returned malformed JSON; no analysis was saved.") from error
+        if not isinstance(parsed, dict):
+            raise LLMGenerationError(f"{agent} returned an invalid structured response.")
+        serialized = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+        with _STRUCTURED_AGENT_CACHE_LOCK:
+            _STRUCTURED_AGENT_CACHE[cache_key] = serialized
+            _STRUCTURED_AGENT_CACHE.move_to_end(cache_key)
+            while len(_STRUCTURED_AGENT_CACHE) > _STRUCTURED_AGENT_CACHE_LIMIT:
+                _STRUCTURED_AGENT_CACHE.popitem(last=False)
+        future.set_result(parsed)
+        return parsed
+    except BaseException as error:
+        future.set_exception(error)
+        raise
+    finally:
+        with _STRUCTURED_AGENT_CACHE_LOCK:
+            if _STRUCTURED_AGENT_IN_FLIGHT.get(cache_key) is future:
+                del _STRUCTURED_AGENT_IN_FLIGHT[cache_key]
 
 
 def _try_structured_agent(extractor, documents: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str | None]:
@@ -505,8 +555,122 @@ def _verified_items(
     return verified
 
 
+def _verified_scope_claim(
+    documents: list[dict[str, Any]],
+    value: Any,
+    source: Any,
+    quote: Any,
+) -> tuple[str, EvidenceReference] | None:
+    if not isinstance(value, str) or not isinstance(source, str) or not isinstance(quote, str):
+        return None
+    verified = _verified_items(documents, [{
+        "description": value,
+        "source": source,
+        "quote": quote,
+    }])
+    return (verified[0][0]["description"], verified[0][1]) if verified else None
+
+
+def _source_main_project_goal(findings: list[ScopeFinding]) -> MainProjectGoal | None:
+    candidates: list[tuple[int, str, EvidenceReference]] = []
+    for finding in findings:
+        if finding.category != "Goal" or not finding.evidence:
+            continue
+        statement = _normalize_text(finding.description)
+        if len(statement) < 22 or statement.casefold() in {"meeting purpose", "project goal", "main project goal"}:
+            continue
+        evidence = finding.evidence[0]
+        text = f"{statement} {evidence.excerpt}".casefold()
+        score = 0
+        if re.search(r"\b(?:(?:overall|main)\s+project\s+|(?:overall|main|project|pilot)\s+)goal\b|\bgoal\s*:", text):
+            score += 4
+        if re.search(r"\b(?:create|develop|build|provide|deliver|implement|establish|automate|combine)\b", statement, re.I):
+            score += 2
+        if re.search(r"\b(?:portal|platform|system|service|solution)\b", statement, re.I):
+            score += 2
+        if re.search(r"\b(?:approval|sign[- ]off|meeting purpose)\b", statement, re.I):
+            score -= 3
+        if 40 <= len(statement) <= 180:
+            score += 1
+        candidates.append((score, statement, evidence))
+    if not candidates:
+        return None
+    _, statement, evidence = max(candidates, key=lambda item: (item[0], len(item[1])))
+    problem = next((item for item in findings if item.category == "Problem" and item.evidence), None)
+    outcome = next((item for item in findings if item.category == "Outcome" and item.evidence), None)
+    return MainProjectGoal(
+        statement=re.sub(
+            r"^(?:(?:main|overall)\s+project\s+|(?:main|overall|project|pilot)\s+)?goal\s*[:\-]\s*",
+            "",
+            statement,
+            flags=re.I,
+        ),
+        problem=problem.description if problem else None,
+        expected_outcome=outcome.description if outcome else None,
+        evidence=[evidence],
+        problem_evidence=problem.evidence if problem else [],
+        outcome_evidence=outcome.evidence if outcome else [],
+    )
+
+
+def _objective_title(description: str) -> str:
+    normalized = _normalize_text(description)
+    if ":" in normalized:
+        prefix = normalized.split(":", 1)[0].strip()
+        if 2 <= len(prefix.split()) <= 8:
+            return prefix
+    phrase = re.split(r"[.;]", normalized, maxsplit=1)[0].strip()
+    words = phrase.split()
+    return " ".join(words[:9]) + ("…" if len(words) > 9 else "")
+
+
+def _supporting_objectives(
+    objectives: list[str],
+    findings: list[ScopeFinding],
+    deliverables: list[str],
+    main_goal: MainProjectGoal | None,
+) -> list[SupportingObjective]:
+    goal_words = set(re.findall(r"[a-z0-9]{3,}", (main_goal.statement if main_goal else "").casefold()))
+    seen: set[str] = set()
+    result: list[SupportingObjective] = []
+    for description in objectives:
+        normalized = _normalize_text(description)
+        key = normalized.casefold()
+        if not normalized or key in seen:
+            continue
+        words = set(re.findall(r"[a-z0-9]{3,}", key))
+        overlap = len(words & goal_words) / max(1, len(words | goal_words))
+        if overlap >= 0.82:
+            continue
+        finding = next((
+            item for item in findings
+            if item.category in {"Objective", "Requirement"}
+            and _normalize_text(item.description).casefold() == key
+            and item.evidence
+        ), None)
+        if finding is None:
+            continue
+        evidence_text = finding.evidence[0].excerpt.casefold()
+        related_deliverable = None
+        for deliverable in deliverables:
+            name = _normalize_text(deliverable.split(";", 1)[0])
+            if len(name) >= 8 and (name.casefold() in key or name.casefold() in evidence_text):
+                related_deliverable = name
+                break
+        seen.add(key)
+        result.append(SupportingObjective(
+            id=f"objective-{len(result)+1}",
+            title=_objective_title(normalized),
+            description=normalized,
+            contribution=f"Contributes to the main goal by accomplishing this documented objective: {normalized}",
+            related_deliverable=related_deliverable,
+            evidence=finding.evidence,
+        ))
+    return result
+
+
 def _llm_scope_analysis(documents: list[dict[str, Any]]) -> dict[str, Any] | None:
-    shape = '''{"goals":[{"description":"...","source":"...","quote":"..."}],"objectives":[{"description":"...","source":"...","quote":"..."}],"scope":[{"description":"...","source":"...","quote":"..."}],"dependencies":[{"description":"...","source":"...","quote":"..."}]}'''
+    shape = '''{"main_project_goal":{"statement":"one overall project goal","source":"...","quote":"...","problem":"... or null","problem_source":"...","problem_quote":"...","expected_outcome":"... or null","outcome_source":"...","outcome_quote":"..."},"goals":[{"description":"...","source":"...","quote":"..."}],"objectives":[{"description":"one distinct supporting objective","source":"...","quote":"..."}],"scope":[{"description":"...","source":"...","quote":"..."}],"deliverables":[{"name":"...","description":"...","source":"...","quote":"..."}],"milestones":[{"name":"...","description":"...","date":null,"status":null,"owner":null,"source":"...","quote":"..."}],"responsibilities":[{"task":"...","owner":null,"role":null,"status":null,"source":"...","quote":"..."}],"dependencies":[{"description":"...","source":"...","quote":"..."}]}'''
     result = _run_structured_agent("Scope and Deliverable Extraction Agent", documents, shape)
     if result is None:
         return None
@@ -529,7 +693,8 @@ def _llm_scope_analysis(documents: list[dict[str, Any]]) -> dict[str, Any] | Non
     ]
     milestones = [ScopeMilestone(
         name=item.get("name") or item.get("description"), date=item.get("date"), status=item.get("status"),
-        description=item.get("description") or item.get("name"), source=evidence.filename, evidence=[evidence],
+        description=item.get("description") or item.get("name"), owner=item.get("owner"),
+        source=evidence.filename, evidence=[evidence],
     ) for item, evidence in groups["milestones"]]
     responsibilities = [ScopeResponsibility(
         task=item.get("task") or item.get("description"), owner=item.get("owner"), role=item.get("role"),
@@ -548,31 +713,91 @@ def _llm_scope_analysis(documents: list[dict[str, Any]]) -> dict[str, Any] | Non
             if category == "Deliverable":
                 description = "; ".join(filter(None, [description, f"Due {item['date']}" if item.get("date") else None, f"Owner: {item['owner']}" if item.get("owner") else None, f"Status: {item['status']}" if item.get("status") else None]))
             findings.append(ScopeFinding(id=f"scope-{len(findings)+1}", category=category, title=title, description=description, evidence=[evidence]))
-    used = sorted({e.filename for entries in groups.values() for _, e in entries if e.filename})
+    raw_goal = result.get("main_project_goal")
+    if isinstance(raw_goal, dict):
+        verified_goal = _verified_scope_claim(
+            documents, raw_goal.get("statement"), raw_goal.get("source"), raw_goal.get("quote"),
+        )
+    else:
+        verified_goal = None
+    main_project_goal = None
+    if verified_goal:
+        statement, evidence = verified_goal
+        verified_problem = _verified_scope_claim(
+            documents, raw_goal.get("problem"), raw_goal.get("problem_source"), raw_goal.get("problem_quote"),
+        )
+        verified_outcome = _verified_scope_claim(
+            documents, raw_goal.get("expected_outcome"), raw_goal.get("outcome_source"), raw_goal.get("outcome_quote"),
+        )
+        main_project_goal = MainProjectGoal(
+            statement=statement,
+            problem=verified_problem[0] if verified_problem else None,
+            expected_outcome=verified_outcome[0] if verified_outcome else None,
+            evidence=[evidence],
+            problem_evidence=[verified_problem[1]] if verified_problem else [],
+            outcome_evidence=[verified_outcome[1]] if verified_outcome else [],
+        )
+    objective_text = [_normalize_text(item["description"]) for item, _ in groups["objectives"]]
+    supporting_objectives = _supporting_objectives(
+        objective_text, findings, deliverables, main_project_goal,
+    )
+    used = {e.filename for entries in groups.values() for _, e in entries if e.filename}
+    if main_project_goal:
+        used.update(
+            evidence.filename
+            for references in (
+                main_project_goal.evidence,
+                main_project_goal.problem_evidence,
+                main_project_goal.outcome_evidence,
+            )
+            for evidence in references
+            if evidence.filename
+        )
     return ScopeAnalysis(
         goals=goals, objectives=objectives, scope=scope, deliverables=deliverables,
+        main_project_goal=main_project_goal, supporting_objectives=supporting_objectives,
         milestones=milestones, responsibilities=responsibilities, dependencies=dependencies,
-        findings=findings, source_documents=used,
-        missing_information=[label for key, label in (("goals", "Project goals"), ("deliverables", "Project deliverables"), ("milestones", "Project milestones"), ("responsibilities", "Team responsibilities")) if not groups[key]],
+        findings=findings, source_documents=sorted(used),
+        missing_information=[
+            label for key, label in (("goals", "Project goals"), ("deliverables", "Project deliverables"), ("milestones", "Project milestones"), ("responsibilities", "Team responsibilities")) if not groups[key]
+        ] + (["Main project goal needs clarification; the documents do not provide a verifiable overall-goal statement."] if main_project_goal is None else []),
     notes=[],
     ).model_dump(mode="json")
 
 
+def _supported_relation(value: Any, evidence: EvidenceReference) -> str | None:
+    if not isinstance(value, str):
+        return None
+    phrase = _normalize_text(value)
+    return phrase if phrase and phrase.casefold() in evidence.excerpt.casefold() else None
+
+
+def _supported_objective_relations(value: Any, evidence: EvidenceReference) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for candidate in value:
+        phrase = _supported_relation(candidate, evidence)
+        if phrase and phrase.casefold() not in {item.casefold() for item in result}:
+            result.append(phrase)
+    return result
+
+
 def _llm_risk_analysis(documents: list[dict[str, Any]]) -> dict[str, Any] | None:
-    shape = '''{"findings":[{"title":"...","category":"...","level":null,"description":"...","impact":null,"likelihood":null,"owner":null,"affected_milestones":[],"recommendations":[],"forecast":null,"source":"...","quote":"..."}]}'''
+    shape = '''{"findings":[{"title":"...","category":"...","level":null,"description":"...","impact":null,"likelihood":null,"owner":null,"affected_milestones":[],"related_project_goal":null,"affected_objectives":[],"recommendations":[],"forecast":null,"source":"...","quote":"..."}]}'''
     result = _run_structured_agent("Risk Detection and Delivery Forecasting Agent", documents, shape)
     if result is None:
         return None
     findings = []
     for item, evidence in _verified_items(documents, result.get("findings")):
-        level = item.get("level")
-        if level not in {None, "Low", "Medium", "High", "Critical"}:
-            continue
+        level = normalize_risk_level(item.get("level"))
         findings.append(RiskFinding(
             id=f"risk-{len(findings)+1}", title=str(item.get("title") or "Project risk"), level=level,
             description=item["description"], impact=item.get("impact"), category=item.get("category"),
             likelihood=item.get("likelihood"), owner=item.get("owner"),
             affected_milestones=[str(v) for v in item.get("affected_milestones", []) if isinstance(v, str)],
+            related_project_goal=_supported_relation(item.get("related_project_goal"), evidence),
+            affected_objectives=_supported_objective_relations(item.get("affected_objectives"), evidence),
             evidence=[evidence], recommendations=[str(v) for v in item.get("recommendations", []) if isinstance(v, str)],
             forecast=item.get("forecast"), inference=False,
         ))
@@ -581,12 +806,19 @@ def _llm_risk_analysis(documents: list[dict[str, Any]]) -> dict[str, Any] | None
     used = sorted({f.evidence[0].filename for f in findings if f.evidence})
     return RiskAnalysis(findings=findings, source_documents=used,
         missing_information=[] if findings else ["No relevant information was found in the uploaded documents."],
-        rules_used=["LLM extraction with source-quote verification; severity and forecasts are not inferred."]
+        rules_used=[
+            "LLM findings require verified source quotations.",
+            "Severity uses source-stated or explainable source-backed probability x impact; insufficient dimensions remain unrated.",
+        ]
     ).model_dump(mode="json")
 
 
 def _llm_blocker_analysis(documents: list[dict[str, Any]]) -> dict[str, Any] | None:
-    shape = '''{"blockers":[{"description":"...","category":"blocker","status":null,"assignee":null,"due_date":null,"priority":null,"related_task":null,"related_milestone":null,"source":"...","quote":"..."}],"unresolved_issues":[],"pending_decisions":[],"action_items":[]}'''
+    item_shape = '{"description":"...","status":null,"assignee":null,"due_date":null,"priority":null,"related_task":null,"related_milestone":null,"related_project_goal":null,"affected_objectives":[],"source":"...","quote":"..."}'
+    shape = (
+        '{"blockers":[' + item_shape + '],"unresolved_issues":[' + item_shape
+        + '],"pending_decisions":[' + item_shape + '],"action_items":[' + item_shape + ']}'
+    )
     result = _run_structured_agent("Blocker and Action Item Identification Agent", documents, shape)
     if result is None:
         return None
@@ -608,7 +840,10 @@ def _llm_blocker_analysis(documents: list[dict[str, Any]]) -> dict[str, Any] | N
             status=str(item["status"]) if item.get("status") else None,
             assignee=item.get("assignee") or item.get("owner"), due_date=item.get("due_date"),
             priority=item.get("priority"), related_task=item.get("related_task"),
-            related_milestone=item.get("related_milestone"), source_document=evidence.filename,
+            related_milestone=item.get("related_milestone"),
+            related_project_goal=_supported_relation(item.get("related_project_goal"), evidence),
+            affected_objectives=_supported_objective_relations(item.get("affected_objectives"), evidence),
+            source_document=evidence.filename,
             evidence=[evidence],
         ) for index, (item, evidence) in enumerate(verified)]
     if any(isinstance(result.get(key), list) and result[key] for key in all_findings) and not any(all_findings.values()):
@@ -668,9 +903,27 @@ def _merge_scope_results(source_result: dict[str, Any], model_result: dict[str, 
             findings.append(item)
             seen.add(key)
     findings = [item.model_copy(update={"id": f"scope-{index}"}) for index, item in enumerate(findings, start=1)]
+    main_project_goal = model.main_project_goal or source.main_project_goal
+    objectives = _merge_text_values(source.objectives, model.objectives)
+    supporting_objectives = _supporting_objectives(
+        objectives,
+        findings,
+        _merge_text_values(source.deliverables, model.deliverables),
+        main_project_goal,
+    )
+    missing_information = [
+        item for item in source.missing_information
+        if "project goal" not in item.casefold()
+    ]
+    if main_project_goal is None:
+        missing_information.append(
+            "Main project goal needs clarification; the documents do not provide a verifiable overall-goal statement."
+        )
     result = ScopeAnalysis(
         goals=_merge_text_values(source.goals, model.goals),
-        objectives=_merge_text_values(source.objectives, model.objectives),
+        objectives=objectives,
+        main_project_goal=main_project_goal,
+        supporting_objectives=supporting_objectives,
         scope=_merge_text_values(source.scope, model.scope),
         deliverables=_merge_text_values(source.deliverables, model.deliverables),
         milestones=source.milestones + [item for item in model.milestones if not any(
@@ -690,7 +943,7 @@ def _merge_scope_results(source_result: dict[str, Any], model_result: dict[str, 
         )],
         progress=_merge_text_values(source.progress, model.progress),
         findings=findings,
-        missing_information=source.missing_information,
+        missing_information=missing_information,
         source_documents=sorted(set(source.source_documents) | set(model.source_documents)),
         notes=[],
     )
@@ -809,7 +1062,7 @@ def analyze_scope(
         chunks = _load_chunks_for_document(document["id"])
         register_blocks = _structured_register_blocks(document)
         for label, category, target in (
-            ({"goal", "project goal"}, "Goal", goals),
+            ({"goal", "project goal", "main project goal", "overall goal", "purpose", "project purpose"}, "Goal", goals),
             ({"success criteria", "objective", "project objective"}, "Objective", objectives),
             ({"out of scope", "scope boundary"}, "Scope", scope),
         ):
@@ -817,6 +1070,17 @@ def analyze_scope(
                 reference = _build_reference(document, value, chunks)
                 if reference.excerpt and value not in target:
                     target.append(value)
+                    findings.append(ScopeFinding(
+                        id=f"scope-{len(findings)+1}", category=category,
+                        title=category, description=value, evidence=[reference],
+                    ))
+        for labels, category in (
+            ({"problem", "main problem", "problem statement"}, "Problem"),
+            ({"expected outcome", "project outcome", "target outcome"}, "Outcome"),
+        ):
+            for value in _following_labeled_lines(document, labels):
+                reference = _build_reference(document, value, chunks)
+                if reference.excerpt:
                     findings.append(ScopeFinding(
                         id=f"scope-{len(findings)+1}", category=category,
                         title=category, description=value, evidence=[reference],
@@ -869,9 +1133,32 @@ def analyze_scope(
             reference = _build_reference(document, normalized, chunks)
             if not lower or _is_structural_heading(normalized):
                 continue
+            problem_match = re.match(r"^(?:main\s+)?problem(?:\s+statement)?\s*[:\-]\s*(.+)$", normalized, re.I)
+            outcome_match = re.match(r"^(?:expected\s+outcome|project\s+outcome|target\s+outcome)\s*[:\-]\s*(.+)$", normalized, re.I)
+            if problem_match or outcome_match:
+                claim = problem_match or outcome_match
+                category = "Problem" if problem_match else "Outcome"
+                findings.append(ScopeFinding(
+                    id=f"scope-{len(findings)+1}", category=category, title=category,
+                    description=claim.group(1).strip(), evidence=[reference] if reference.excerpt else [],
+                ))
             if re.match(r"^deliverable\s*:", lower) and any(block.get("deliverable") for block in register_blocks):
                 continue
-            if any(keyword in lower for keyword in ["goal", "objective", "purpose", "aim", "mission", "target outcome"]):
+            if "objective" in lower:
+                objective = re.sub(
+                    r"^(?:supporting\s+)?(?:project\s+)?objective(?:\s+\d+)?\s*[:\-]\s*",
+                    "", normalized, flags=re.I,
+                ).strip()
+                if objective and objective not in objectives:
+                    objectives.append(objective)
+                    findings.append(ScopeFinding(
+                        id=f"scope-{len(findings)+1}",
+                        category="Objective",
+                        title="Project objective",
+                        description=objective,
+                        evidence=[reference] if reference.excerpt else [],
+                    ))
+            elif any(keyword in lower for keyword in ["goal", "purpose", "aim", "mission", "target outcome"]):
                 if not any(normalized in item for item in goals):
                     goals.append(normalized)
                     findings.append(ScopeFinding(
@@ -891,16 +1178,6 @@ def analyze_scope(
                             title="Project deliverable",
                             description=normalized,
                             related_deliverable=normalized,
-                            evidence=[reference] if reference.excerpt else [],
-                        ))
-                elif "objective" in lower:
-                    if normalized not in objectives:
-                        objectives.append(normalized)
-                        findings.append(ScopeFinding(
-                            id=f"scope-{len(findings) + 1}",
-                            category="Objective",
-                            title="Project objective",
-                            description=normalized,
                             evidence=[reference] if reference.excerpt else [],
                         ))
             is_due_date_field = bool(re.fullmatch(r"due date\s*:\s*.+", lower))
@@ -1026,10 +1303,20 @@ def analyze_scope(
             seen_finding_descriptions.add(key)
             unique_findings.append(finding)
     findings = [finding.model_copy(update={"id": f"scope-{index}"}) for index, finding in enumerate(unique_findings, start=1)]
+    main_project_goal = _source_main_project_goal(findings)
+    supporting_objectives = _supporting_objectives(
+        objectives, findings, deliverables, main_project_goal,
+    )
+    if main_project_goal is None:
+        missing_information.append(
+            "Main project goal needs clarification; the documents do not provide a verifiable overall-goal statement."
+        )
 
     payload = ScopeAnalysis(
         goals=goals[:25],
         objectives=objectives[:25],
+        main_project_goal=main_project_goal,
+        supporting_objectives=supporting_objectives,
         scope=scope[:50],
         deliverables=deliverables[:25],
         milestones=milestones[:25],
@@ -1084,7 +1371,7 @@ def analyze_risks(
     source_documents: list[str] = []
     rules_used = [
         "Findings are linked to documented risks, dependencies, milestones, and delivery status.",
-        "Severity is shown only when the source documents state it.",
+        "Severity uses source-stated or explainable source-backed probability x impact; insufficient dimensions remain unrated.",
     ]
     if llm_error:
         rules_used.append("Some findings were extracted directly from uploaded document evidence.")
@@ -1612,12 +1899,8 @@ def maybe_call_llm(prompt: str, context: str, *, structured: bool = False) -> st
                 )
             answer = getattr(response, "output_text", None)
         else:
-            response = _ollama_http_client(
-                settings.ollama_base_url,
-                timeout_seconds,
-            ).post(
-                "/api/chat",
-                json={
+            client = _ollama_http_client(settings.ollama_base_url, timeout_seconds)
+            request_body = {
                     "model": settings.ollama_model,
                     "stream": False,
                     "keep_alive": "10m",
@@ -1626,7 +1909,7 @@ def maybe_call_llm(prompt: str, context: str, *, structured: bool = False) -> st
                         "temperature": 0,
                         "top_p": 0.65,
                         "num_ctx": 4096,
-                        "num_predict": 256 if structured else 192,
+                        "num_predict": 512 if structured else 384,
                     },
                     "messages": [
                         {"role": "system", "content": prompt},
@@ -1635,9 +1918,45 @@ def maybe_call_llm(prompt: str, context: str, *, structured: bool = False) -> st
                             "content": f"Complete extracted project document chunks:\n{context[:48000]}",
                         },
                     ],
-                },
-            )
-            response.raise_for_status()
+                }
+            response = None
+            for attempt in range(2):
+                try:
+                    response = client.post("/api/chat", json=request_body)
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError):
+                    if attempt == 1:
+                        raise
+                    logger.warning("Ollama connection failed; retrying once after a short delay.")
+                    sleep(0.35)
+                    continue
+                status_code = getattr(response, "status_code", 200)
+                if status_code in {429, 500, 502, 503, 504} and attempt == 0:
+                    logger.warning("Ollama returned transient HTTP %s; retrying once.", status_code)
+                    sleep(0.35)
+                    continue
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as error:
+                    response_text = (
+                        f"{getattr(error.response, 'text', '') or ''} {error}"
+                    ).casefold()
+                    if error.response.status_code == 404 and "model" in response_text:
+                        raise LLMConfigurationError(
+                            f"Ollama is reachable, but configured model '{settings.ollama_model}' "
+                            "is unavailable. Verify it with `ollama list`."
+                        ) from error
+                    logger.error(
+                        "Ollama request rejected status=%s response_excerpt=%r",
+                        error.response.status_code,
+                        (getattr(error.response, "text", "") or "")[:300],
+                    )
+                    raise LLMGenerationError(
+                        f"Ollama rejected the request with HTTP {error.response.status_code}. "
+                        "Check the Ollama service and model logs, then retry."
+                    ) from error
+                break
+            if response is None:
+                raise LLMGenerationError("Ollama did not return a response.")
             result = response.json()
             if not isinstance(result, dict):
                 raise ValueError("Ollama returned an invalid response.")
@@ -1707,6 +2026,22 @@ def maybe_call_llm(prompt: str, context: str, *, structured: bool = False) -> st
             raise LLMTimeoutError(
                 f"The configured {provider} answer-generation service timed out after "
                 f"{timeout_seconds:g} seconds. Retry the question."
+            ) from error
+        if provider == "ollama" and isinstance(error, httpx.ConnectError):
+            logger.exception(
+                "Could not connect to Ollama base_url=%s model=%s",
+                settings.ollama_base_url,
+                settings.ollama_model,
+            )
+            raise LLMGenerationError(
+                "Could not connect to the configured Ollama service. Confirm Ollama is running "
+                "at OLLAMA_BASE_URL and that the configured model is installed."
+            ) from error
+        if provider == "ollama" and isinstance(error, httpx.RemoteProtocolError):
+            logger.exception("Ollama closed the connection before returning a response.")
+            raise LLMGenerationError(
+                "Ollama closed the answer-generation connection unexpectedly. Check the Ollama "
+                "service logs and retry."
             ) from error
         logger.exception("Configured %s answer generation failed", provider)
         raise LLMGenerationError(

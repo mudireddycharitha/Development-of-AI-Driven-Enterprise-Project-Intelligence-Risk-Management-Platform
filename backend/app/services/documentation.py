@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.database.db import connect
+from app.schemas.analysis import RiskFinding
 from app.services.project_agents import (
     _build_reference,
     _load_chunks_for_document,
@@ -163,13 +164,21 @@ def _risk_category(text: str) -> str:
 
 
 def _explicit_likelihood(text: str) -> str:
-    if re.search(r"\b(not likely|unlikely)\b", text, flags=re.IGNORECASE):
-        return "Unlikely"
     match = re.search(
-        r"\b(?:likelihood\s*(?:is|:)?\s*|)(very likely|likely|possible|very unlikely)\b",
+        r"\blikelihood\s*(?:is|:)?\s*(low|medium|high|critical|very likely|likely|possible|"
+        r"very unlikely|unlikely|rare)\b",
         text, flags=re.IGNORECASE,
     )
-    return match.group(1).title() if match else "Not stated in source"
+    if not match:
+        return "Not stated in source"
+    value = match.group(1).casefold()
+    if value in {"rare", "very unlikely", "unlikely"}:
+        return "Low"
+    if value in {"possible"}:
+        return "Medium"
+    if value in {"likely", "very likely"}:
+        return "High"
+    return value.title()
 
 
 def _explicit_impact(text: str) -> str:
@@ -202,22 +211,15 @@ def _risk_level(text: str, agent_level: str) -> str:
     )
     if explicit:
         return next(group for group in explicit.groups() if group).title()
-    lowered = text.lower()
-    if any(term in lowered for term in ("cannot proceed", "hard blocker", "cancelled", "critical")):
-        return "Critical"
-    if any(term in lowered for term in ("overdue", "blocked", "dependency gap", "no approval", "resource shortage")):
-        return "High"
-    if any(term in lowered for term in (
-        "delay", "delayed", "schedule", "dependency", "approval pending", "risk",
-        "not available", "unavailable", "waiting for", "waiting on",
-    )):
-        return "Medium"
-    return agent_level
+    normalized_agent_level = (agent_level or "").strip().casefold()
+    if normalized_agent_level in {"critical", "high", "medium", "low"}:
+        return normalized_agent_level.title()
+    return "Unrated"
 
 
 def _risk_register(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ids = [document["id"] for document in documents]
-    analysis = analyze_risks(document_ids=ids, use_llm=False)
+    analysis = analyze_risks(document_ids=ids, use_llm=False, persist=False)
     result: list[dict[str, Any]] = []
     for finding in analysis["findings"]:
         evidence = finding.get("evidence") or []
@@ -229,10 +231,16 @@ def _risk_register(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "title": finding["title"],
             "description": finding["description"],
             "category": _risk_category(finding["description"]),
-            "likelihood": _explicit_likelihood(finding["description"]),
-            "impact": _explicit_impact(finding["description"]),
-            "risk_level": _risk_level(finding["description"], finding["level"]),
-            "suggested_mitigation": (finding.get("recommendations") or [""])[0],
+            "likelihood": finding.get("likelihood") or _explicit_likelihood(finding["description"]),
+            "impact": finding.get("impact") or _explicit_impact(finding["description"]),
+            "risk_level": _risk_level(finding["description"], finding.get("level") or ""),
+            "probability_score": finding.get("probability_score"),
+            "impact_score": finding.get("impact_score"),
+            "severity_score": finding.get("severity_score"),
+            "severity_reason": finding.get("severity_reason"),
+            "insufficient_evidence": finding.get("insufficient_evidence") or [],
+            "suggested_mitigation": finding.get("recommended_mitigation")
+            or (finding.get("recommendations") or [""])[0],
             "responsible_person": _responsible_person(finding["description"]),
             "source_document": reference.get("filename") or "Unknown source",
             "evidence": reference,
@@ -257,19 +265,26 @@ def _risk_register(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
             reference = _build_reference(document, sentence, chunks)
             if not reference.excerpt:
                 continue
+            risk = RiskFinding(
+                id=_stable_id("RISK", document["id"], sentence),
+                title="Dependency availability risk",
+                description=sentence,
+                evidence=[reference],
+                inference=True,
+                recommendations=[
+                    "Confirm the dependency owner and expected availability date before dependent work proceeds."
+                ],
+            ).model_dump(mode="json")
             result.append({
-                "id": _stable_id("RISK", document["id"], sentence),
-                "title": "Dependency availability risk",
-                "description": sentence,
+                **risk,
                 "category": "Dependency",
-                "likelihood": _explicit_likelihood(sentence),
-                "impact": _explicit_impact(sentence),
-                "risk_level": _risk_level(sentence, "Not stated"),
-                "suggested_mitigation": "Confirm the dependency owner and expected availability date before dependent work proceeds.",
+                "likelihood": risk.get("likelihood") or "Not stated in source",
+                "impact": risk.get("impact") or "Not stated in source",
+                "risk_level": risk.get("level") or "Unrated",
+                "suggested_mitigation": (risk.get("recommendations") or [""])[0],
                 "responsible_person": _responsible_person(sentence),
                 "source_document": document["filename"],
                 "evidence": reference.model_dump(mode="json"),
-                "inference": True,
             })
     return result
 
@@ -377,6 +392,42 @@ def generate_documentation(document_ids: list[str] | None = None) -> dict[str, A
     return payload
 
 
+def _refresh_legacy_risk_register(payload: dict[str, Any]) -> dict[str, Any]:
+    stored_risks = payload.get("risk_register")
+    if not isinstance(stored_risks, list) or not stored_risks:
+        return payload
+    if all(isinstance(item, dict) and item.get("severity_reason") for item in stored_risks):
+        return payload
+    document_ids = payload.get("document_ids")
+    if not isinstance(document_ids, list) or not document_ids:
+        return payload
+    documents = _load_documents(document_ids=[str(item) for item in document_ids])
+    if len(documents) != len(set(document_ids)):
+        return payload
+
+    refreshed_by_id = {
+        item["id"]: item for item in _risk_register(documents)
+        if isinstance(item.get("id"), str)
+    }
+    merged = []
+    seen_ids = set()
+    for existing in stored_risks:
+        if not isinstance(existing, dict):
+            continue
+        risk_id = existing.get("id")
+        current = refreshed_by_id.get(risk_id) if isinstance(risk_id, str) else None
+        merged.append({**existing, **current} if current else existing)
+        if risk_id:
+            seen_ids.add(risk_id)
+    merged.extend(item for key, item in refreshed_by_id.items() if key not in seen_ids)
+    payload["risk_register"] = merged
+    payload["total_generated_items"] = sum(
+        len(payload.get(key) or [])
+        for key in ("user_stories", "risk_register", "action_items", "pending_decisions")
+    )
+    return payload
+
+
 def get_latest_documentation(document_ids: list[str] | None = None) -> dict[str, Any] | None:
     with connect() as connection:
         if document_ids is None:
@@ -394,7 +445,7 @@ def get_latest_documentation(document_ids: list[str] | None = None) -> dict[str,
                 "SELECT result_json FROM documentation_generations WHERE generation_key = ?",
                 (generation_key,),
             ).fetchone()
-    return json.loads(row["result_json"]) if row else None
+    return _refresh_legacy_risk_register(json.loads(row["result_json"])) if row else None
 
 
 def get_documentation(generation_id: str) -> dict[str, Any] | None:
@@ -403,4 +454,4 @@ def get_documentation(generation_id: str) -> dict[str, Any] | None:
             "SELECT result_json FROM documentation_generations WHERE id = ?",
             (generation_id,),
         ).fetchone()
-    return json.loads(row["result_json"]) if row else None
+    return _refresh_legacy_risk_register(json.loads(row["result_json"])) if row else None

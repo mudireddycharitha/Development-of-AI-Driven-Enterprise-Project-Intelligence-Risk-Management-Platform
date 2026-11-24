@@ -31,8 +31,9 @@ def update_status(document_id: str, status: str, error: str | None = None, stage
     with connect() as connection:
         connection.execute(
             """UPDATE documents SET processing_status = ?, extraction_error = ?,
-               failed_stage = ?, updated_at = ? WHERE id = ?""",
-            (status, error, stage, utc_now(), document_id),
+               failed_stage = ?, change_type = CASE WHEN ? = 'failed' THEN 'failed' ELSE change_type END,
+               updated_at = ? WHERE id = ?""",
+            (status, error, stage, status, utc_now(), document_id),
         )
 
 
@@ -135,8 +136,9 @@ def process_document(document_id: str) -> dict[str, Any]:
             )
             connection.execute(
                 """UPDATE documents SET processing_status = 'indexed', extraction_error = NULL,
-                   failed_stage = NULL, indexed_chunk_count = ?, updated_at = ? WHERE id = ?""",
-                (len(records), utc_now(), document_id),
+                   failed_stage = NULL, indexed_chunk_count = ?, updated_at = ?,
+                   last_processed_at = ? WHERE id = ?""",
+                (len(records), utc_now(), utc_now(), document_id),
             )
             result = row_dict(connection.execute(
                 "SELECT * FROM documents WHERE id = ?", (document_id,)

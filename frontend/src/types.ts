@@ -6,6 +6,7 @@ export interface DocumentRecord {
   file_type: string
   file_size: number
   uploaded_at: string
+  updated_at?: string
   processing_status: ProcessingStatus
   extraction_error?: string | null
   failed_stage?: string | null
@@ -14,6 +15,13 @@ export interface DocumentRecord {
   document_version?: number
   version_of_document_id?: string | null
   is_current_version?: boolean | number
+  document_category?: string
+  document_title?: string | null
+  document_description?: string | null
+  project_name?: string | null
+  milestone_name?: string | null
+  change_type?: 'new' | 'updated' | 'unchanged' | 'failed'
+  last_processed_at?: string | null
 }
 
 export interface ChunkRecord {
@@ -106,7 +114,27 @@ export interface ScopeMilestone {
   date?: string
   status?: string
   description?: string
+  owner?: string
   source?: string
+  evidence: EvidenceReference[]
+}
+
+export interface MainProjectGoal {
+  title: string
+  statement: string
+  problem?: string | null
+  expected_outcome?: string | null
+  evidence: EvidenceReference[]
+  problem_evidence: EvidenceReference[]
+  outcome_evidence: EvidenceReference[]
+}
+
+export interface SupportingObjective {
+  id: string
+  title: string
+  description: string
+  contribution: string
+  related_deliverable?: string | null
   evidence: EvidenceReference[]
 }
 
@@ -141,6 +169,8 @@ export interface ScopeFinding {
 export interface ScopeAnalysis {
   goals: string[]
   objectives: string[]
+  main_project_goal?: MainProjectGoal | null
+  supporting_objectives?: SupportingObjective[]
   scope: string[]
   deliverables: string[]
   milestones: ScopeMilestone[]
@@ -153,6 +183,12 @@ export interface ScopeAnalysis {
   missing_information: string[]
   source_documents: string[]
   notes: string[]
+  processing?: {
+    agent_status: string
+    processing_duration_ms: number
+    evidence_chunks_retrieved: number
+    documents_analyzed: number
+  }
 }
 
 export interface RiskFinding {
@@ -163,8 +199,16 @@ export interface RiskFinding {
   category?: string | null
   impact?: string | null
   likelihood?: string | null
+  probability_score?: number | null
+  impact_score?: number | null
+  severity_score?: number | null
+  severity_reason?: string | null
+  insufficient_evidence?: string[]
+  recommended_mitigation?: string | null
   owner?: string | null
   affected_milestones: string[]
+  related_project_goal?: string | null
+  affected_objectives?: string[]
   evidence: EvidenceReference[]
   recommendations: string[]
   forecast?: string | null
@@ -178,6 +222,12 @@ export interface RiskAnalysis {
   source_documents: string[]
   rules_used: string[]
   notes: string[]
+  processing?: {
+    agent_status: string
+    processing_duration_ms: number
+    evidence_chunks_retrieved: number
+    documents_analyzed: number
+  }
 }
 
 export interface BlockerItem {
@@ -190,6 +240,8 @@ export interface BlockerItem {
   priority?: string | null
   related_task?: string | null
   related_milestone?: string | null
+  related_project_goal?: string | null
+  affected_objectives?: string[]
   source_document?: string | null
   evidence: EvidenceReference[]
   recommendation?: string | null
@@ -203,6 +255,12 @@ export interface BlockerAnalysis {
   missing_information: string[]
   source_documents: string[]
   notes: string[]
+  processing?: {
+    agent_status: string
+    processing_duration_ms: number
+    evidence_chunks_retrieved: number
+    documents_analyzed: number
+  }
 }
 
 export interface GeneratedUserStory {
@@ -224,13 +282,18 @@ export interface GeneratedRisk {
   title: string
   description: string
   category: string
-  likelihood: string
-  impact: string
-  risk_level: string
-  suggested_mitigation: string
+  likelihood: string | null
+  impact: string | null
+  risk_level: string | null
+  probability_score?: number | null
+  impact_score?: number | null
+  severity_score?: number | null
+  severity_reason?: string | null
+  insufficient_evidence?: string[]
+  suggested_mitigation: string | null
   responsible_person: string | null
   source_document: string
-  evidence: EvidenceReference
+  evidence: EvidenceReference | null
   inference?: boolean
 }
 

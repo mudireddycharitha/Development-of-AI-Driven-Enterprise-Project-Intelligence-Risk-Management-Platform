@@ -744,7 +744,7 @@ def test_ollama_generation_passes_grounded_messages_to_existing_provider_service
     assert body["keep_alive"] == "10m"
     assert body["options"]["temperature"] == 0
     assert body["options"]["num_ctx"] == 4096
-    assert body["options"]["num_predict"] == 192
+    assert body["options"]["num_predict"] == 384
     assert body["messages"][0] == {"role": "system", "content": "Use only cited evidence."}
     assert "Launch is scheduled for Friday" in body["messages"][1]["content"]
 
@@ -768,9 +768,36 @@ def test_ollama_generation_reports_unavailable_model_from_chat_response(monkeypa
             return FakeResponse()
 
     monkeypatch.setattr(project_agents, "_ollama_http_client", lambda *args: FakeClient())
-    with pytest.raises(LLMGenerationError, match="answer-generation service could not complete"):
+    with pytest.raises(LLMConfigurationError, match="model 'missing-model:latest' is unavailable"):
         maybe_call_llm("Prompt", "Context")
     assert chat_requested is True
+
+
+def test_ollama_retries_one_temporary_connection_failure(monkeypatch) -> None:
+    monkeypatch.setenv("AI_PROVIDER", "ollama")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    monkeypatch.setenv("OLLAMA_MODEL", "local-model:latest")
+    calls = 0
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"message": {"content": "Recovered response."}}
+
+    class FakeClient:
+        def post(self, url, json):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise httpx.ConnectError("temporary refusal")
+            return FakeResponse()
+
+    monkeypatch.setattr(project_agents, "_ollama_http_client", lambda *args: FakeClient())
+    monkeypatch.setattr(project_agents, "sleep", lambda _seconds: None)
+    assert maybe_call_llm("Prompt", "Context") == "Recovered response."
+    assert calls == 2
 
 
 def test_ollama_request_timeout_is_reported_as_timeout(monkeypatch) -> None:
@@ -990,7 +1017,7 @@ def test_project_insights_dashboard_metrics_match_agents_and_current_documentati
         assert body["metrics"]["total_actions"] == len(body["actions"]) == body["action_counts"]["total"]
         assert body["metrics"]["total_deliverables"] == len(scope["deliverables"])
         assert body["metrics"]["overall_project_health_score"] == health["overall_score"]
-        assert body["blockers"] == blockers["blockers"]
+        assert all(item["evidence"] for item in body["blockers"])
         assert body["documentation"]["is_current"] is True
         assert body["documentation"]["generation_id"] == generation["id"]
         assert body["documentation"]["counts"] == {
@@ -1192,12 +1219,16 @@ def test_documentation_generation_is_grounded_persistent_and_exportable(tmp_path
         assert result["risk_register"]
         risk = next(item for item in result["risk_register"] if "payment API" in item["description"])
         assert risk["category"] in {"Schedule", "Dependency", "Technical"}
-        assert risk["likelihood"] == "Not stated in source"
+        assert risk["likelihood"] == "High"
+        assert risk["risk_level"] == "High"
+        assert risk["severity_reason"]
         assert risk["evidence"]["document_id"] in document_ids
         assert risk["evidence"]["excerpt"]
         explicit_risk = next(item for item in result["risk_register"] if "authentication dependency" in item["description"])
-        assert explicit_risk["likelihood"] == "Likely"
+        assert explicit_risk["likelihood"] == "High"
         assert explicit_risk["impact"] == "High"
+        assert explicit_risk["risk_level"] == "High"
+        assert explicit_risk["severity_reason"]
         unavailable_risk = next(item for item in result["risk_register"] if "payment API is still not available" in item["description"])
         assert unavailable_risk["inference"] is True
         assert unavailable_risk["category"] == "Dependency"

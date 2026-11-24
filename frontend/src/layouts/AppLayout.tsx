@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { Activity, Blocks, BookOpenText, Boxes, CircleHelp, Files, Gauge, Menu, Settings, ShieldAlert, Target, Upload, Workflow, X, ListChecks, FileOutput, HeartPulse, MessagesSquare, ChartNoAxesCombined, Search } from 'lucide-react'
+import { Activity, Blocks, BookOpenText, Boxes, CircleHelp, Files, Gauge, Menu, Settings, ShieldAlert, Target, Upload, Workflow, X, ListChecks, FileOutput, HeartPulse, MessagesSquare, ChartNoAxesCombined, Search, FilePlus2 } from 'lucide-react'
 import { apiService } from '../services/api'
 import type { SystemHealth } from '../types'
+import { RouteErrorBoundary } from '../components/RouteErrorBoundary'
 
 const navigationGroups = [
   { title: 'WORKSPACE', items: [
@@ -10,6 +11,7 @@ const navigationGroups = [
     { to: '/documents', label: 'Documents', icon: Files },
     { to: '/search', label: 'Semantic Search', icon: Search },
     { to: '/upload', label: 'Document upload', icon: Upload },
+    { to: '/incremental-upload', label: 'Incremental Document Upload', icon: FilePlus2 },
   ] },
   { title: 'PROJECT INTELLIGENCE', items: [
     { to: '/project-intelligence?view=scope', label: 'Scope & Deliverables', icon: Target },
@@ -107,7 +109,7 @@ export function AppLayout() {
           </NavLink>
         </div>
       </header>
-      <div className="content-area"><Outlet /></div>
+      <div className="content-area"><RouteErrorBoundary key={location.pathname}><Outlet /></RouteErrorBoundary></div>
     </main>
   </div>
 }

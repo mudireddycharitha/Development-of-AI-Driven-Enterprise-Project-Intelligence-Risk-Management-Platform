@@ -3,7 +3,7 @@ import type { AssistantMessage, AssistantResponse, BlockerAnalysis, ChunkPageRes
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000',
-  timeout: 0,
+  timeout: 300_000,
 })
 
 export function errorMessage(error: unknown): string {
@@ -55,6 +55,26 @@ export const apiService = {
       '/documents/upload',
       data,
       { onUploadProgress: event => onProgress?.(event.total ? Math.round(event.loaded * 100 / event.total) : 0) },
+    )).data
+  },
+  incrementalUpload: async (files: File[], metadata: {
+    category: string
+    title?: string
+    description?: string
+    project_name?: string
+    milestone_name?: string
+  }, onProgress?: (progress: number) => void) => {
+    const data = new FormData()
+    files.forEach(file => data.append('files', file))
+    data.set('category', metadata.category)
+    if (metadata.title) data.set('title', metadata.title)
+    if (metadata.description) data.set('description', metadata.description)
+    if (metadata.project_name) data.set('project_name', metadata.project_name)
+    if (metadata.milestone_name) data.set('milestone_name', metadata.milestone_name)
+    return (await api.post<{ results: Array<{ document_id?: string; filename: string; status: string; error?: string; chunk_count?: number; duplicate?: boolean; document_version?: number; previous_document_id?: string }>; successful: number; failed: number; updated: number }>(
+      '/documents/incremental/upload',
+      data,
+      { onUploadProgress: event => onProgress?.(event.total ? Math.round(event.loaded * 100 * 0.9) : 0) },
     )).data
   },
   reprocess: async (id: string) => (await api.post(`/documents/${id}/reprocess`)).data,

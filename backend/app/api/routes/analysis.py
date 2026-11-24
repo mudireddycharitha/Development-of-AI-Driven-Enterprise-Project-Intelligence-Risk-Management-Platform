@@ -1,5 +1,6 @@
 import logging
 from time import perf_counter
+from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException
 
@@ -29,6 +30,34 @@ def _execute(agent, **kwargs) -> dict:
         + len(result.get("unresolved_issues") or []) + len(result.get("pending_decisions") or [])
         + len(result.get("action_items") or []),
     )
+    duration_ms = (perf_counter() - started) * 1000
+    evidence_chunks = 0
+    evidence_locations: set[tuple[str, str]] = set()
+    analysis_items: list[Any] = []
+    for key in (
+        "findings", "blockers", "unresolved_issues", "pending_decisions",
+        "action_items", "milestones", "responsibilities", "dependencies",
+    ):
+        value = result.get(key)
+        if isinstance(value, list):
+            analysis_items.extend(value)
+    for item in analysis_items:
+        evidence = item.get("evidence") if isinstance(item, dict) else None
+        if evidence:
+            for reference in evidence:
+                chunk_id = str(reference.get("chunk_id") or "")
+                document_id = str(reference.get("document_id") or "")
+                key = (document_id, chunk_id)
+                if chunk_id and key not in evidence_locations:
+                    evidence_locations.add(key)
+                    evidence_chunks += 1
+    result["processing"] = {
+        "agent_status": "Completed",
+        "processing_duration_ms": round(duration_ms, 1),
+        "evidence_chunks_retrieved": evidence_chunks,
+        "documents_analyzed": len(kwargs.get("document_ids") or [])
+        + int(bool(kwargs.get("document_id"))),
+    }
     return result
 
 
