@@ -16,14 +16,13 @@ A local-first project intelligence workspace that turns project documents into s
 - [8. AI agents: inputs, processing, and outputs](#8-ai-agents-inputs-processing-and-outputs)
 - [9. Application workflow](#9-application-workflow)
 - [10. User interface](#10-user-interface)
-- [11. Screenshots](#11-screenshots)
-- [12. Repository structure](#12-repository-structure)
-- [13. Installation and setup](#13-installation-and-setup)
-- [14. API reference](#14-api-reference)
-- [15. Testing and validation](#15-testing-and-validation)
-- [16. Security and error handling](#16-security-and-error-handling)
-- [17. Limitations and future enhancements](#17-limitations-and-future-enhancements)
-- [18. Conclusion](#18-conclusion)
+- [11. Repository structure](#11-repository-structure)
+- [12. Installation and setup](#12-installation-and-setup)
+- [13. API reference](#13-api-reference)
+- [14. Testing and validation](#14-testing-and-validation)
+- [15. Security and error handling](#15-security-and-error-handling)
+- [16. Limitations and future enhancements](#16-limitations-and-future-enhancements)
+- [17. Conclusion](#17-conclusion)
 
 ## 1. Project overview
 
@@ -372,25 +371,7 @@ The interface uses a responsive enterprise workspace layout with grouped sidebar
 
 The frontend uses a keyboard shortcut (`Ctrl+K` or `Cmd+K`) to open Semantic Search. The interface polls backend health every 30 seconds. Project Assistant conversation history is keyed by a session UUID stored in browser session storage and persisted by the backend.
 
-## 11. Screenshots
-
-No screenshot files are currently committed. The entries below are **placeholders only**; capture real screenshots and add the files before replacing them with active image links. No screenshots are fabricated by this README.
-
-| Screen | Expected image path | Status |
-|---|---|---|
-| Dashboard | `docs/screenshots/dashboard.png` | Not captured |
-| Document upload | `docs/screenshots/document-upload.png` | Not captured |
-| Document processing status | `docs/screenshots/document-processing.png` | Not captured |
-| Scope & Deliverables Agent | `docs/screenshots/scope-deliverables-agent.png` | Not captured |
-| Risk Intelligence Agent | `docs/screenshots/risk-intelligence-agent.png` | Not captured |
-| Blockers & Action Items | `docs/screenshots/blockers-action-items.png` | Not captured |
-| Documentation Generation | `docs/screenshots/documentation-generation.png` | Not captured |
-| Project Health Scoring | `docs/screenshots/project-health.png` | Not captured |
-| Conversational Assistant | `docs/screenshots/project-assistant.png` | Not captured |
-| Incremental Document Upload | `docs/screenshots/incremental-document-upload.png` | Not captured |
-| Project Insights | `docs/screenshots/project-insights.png` | Not captured |
-
-## 12. Repository structure
+## 11. Repository structure
 
 ```text
 .
@@ -501,7 +482,7 @@ No screenshot files are currently committed. The entries below are **placeholder
 
 The `backend/app/models/` package currently contains no database ORM models; persistence is implemented with SQLite queries in the database and service modules.
 
-## 13. Installation and setup
+## 12. Installation and setup
 
 ### Prerequisites
 
@@ -600,7 +581,7 @@ Open the frontend at [http://127.0.0.1:5173](http://127.0.0.1:5173). The API hea
 
 Local data defaults to `data\uploads`, `data\extracted_text`, `data\metadata\platform.sqlite3`, and `data\chroma_db`. Set `APP_DATA_DIR` to use another writable directory.
 
-## 14. API reference
+## 13. API reference
 
 All endpoints are served by the FastAPI application on the configured backend origin. JSON response shapes are described at a high level below; `/docs` exposes the generated OpenAPI request and response schemas.
 
@@ -659,7 +640,7 @@ All endpoints are served by the FastAPI application on the configured backend or
 
 Common error responses include validation errors (4xx), missing resources (404), unprocessable document/request errors (422), provider configuration or generation failures (503), and LLM timeouts (504). Error details are returned through FastAPI's `detail` field; exact schemas are available in `/docs`.
 
-## 15. Testing and validation
+## 14. Testing and validation
 
 The following checks were executed while preparing this report:
 
@@ -694,7 +675,7 @@ python -m pytest tests\test_processing.py -k real_embedding
 Remove-Item Env:\RUN_MODEL_INTEGRATION
 ```
 
-## 16. Security and error handling
+## 15. Security and error handling
 
 - Uploads are restricted to registered extensions, checked for empty content, and limited by file, batch, extracted-character, and chunk-count settings. Stored names are generated from UUIDs; original names are reduced to a basename and sanitized for storage.
 - `.env` is ignored by Git; `.env.example` contains configuration names and placeholders, not real credentials. Provider secrets are read only by the backend and are not returned in health/status responses.
@@ -704,7 +685,7 @@ Remove-Item Env:\RUN_MODEL_INTEGRATION
 - SQLite operations use parameterized values for records; database connections enable foreign-key enforcement. Startup initializes the local schema and adds document-version columns for existing databases without discarding existing records.
 - CORS origins are configurable. The application does **not** implement authentication, authorization, tenant isolation, or a shared-user access-control layer. Do not expose this local development service to an untrusted network without adding suitable controls.
 
-## 17. Limitations and future enhancements
+## 16. Limitations and future enhancements
 
 ### Current limitations
 
@@ -722,9 +703,9 @@ Remove-Item Env:\RUN_MODEL_INTEGRATION
 - Add OCR for scanned and image-only documents.
 - Introduce background task processing and progress reporting for large uploads.
 - Add authentication, authorization, and deployment hardening for shared environments.
-- Add automated browser-based end-to-end tests and capture real product screenshots.
+- Add automated browser-based end-to-end tests.
 - Improve date and entity extraction, and evaluate agent findings against a labeled project-document dataset.
 
-## 18. Conclusion
+## 17. Conclusion
 
 The platform addresses the fragmentation of project information by turning local project documents into a searchable, source-linked knowledge base. It connects document extraction and semantic retrieval with transparent rule-based scope, risk, blocker, and health analysis; saved structured documentation; and a conversational assistant that cites retrieved evidence. Its incremental version handling preserves earlier indexed records while keeping current analysis focused on the latest successfully indexed same-name version. The result is a practical local foundation for evidence-grounded project review, with clear boundaries around heuristic findings, model use, and current operational limitations.
